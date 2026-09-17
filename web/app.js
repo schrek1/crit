@@ -1849,7 +1849,8 @@
   // the reader had already scrolled past collapses to nothing, the document
   // ends up shorter than the current offset, and the browser clamps to the top.
   // Use this for view toggles that must rebuild diffs (split/unified, rendered
-  // diff) but should leave the reader where they were. Remounts only bodies at
+  // diff) and for the round-complete rebuild — anything that should leave the
+  // reader where they were. Remounts only bodies at
   // or above the reading position — below-fold stays deferred — and pins the
   // mid-viewport line (falling back to the topmost intersecting file section).
   // Not for hide-resolved (CSS + highlight sync) or initial load / scope change.
@@ -7985,7 +7986,7 @@
         updateHeaderRound();
         updateDiffModeToggle();
         renderFileTree();
-        renderAllFiles();
+        renderAllFilesKeepingPlace();
         buildToc();
         updateCommentCount();
         updateViewedCount();

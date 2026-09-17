@@ -84,6 +84,44 @@ test.describe('Scroll position across comment updates', () => {
     expect(Math.abs(after.top - before.top)).toBeLessThan(50);
   });
 
+  // Round-complete (the agent re-arming after Finish Review) re-fetches the
+  // session and rebuilds every section, so it threw the reader back to the top
+  // once per round — the same deferred-body collapse as above.
+  test('round-complete keeps the file being read where it was on screen', async ({ page, request }) => {
+    await page.setViewportSize({ width: 1200, height: 400 });
+
+    const session = await (await request.get('/api/session')).json();
+    const lastFile = session.files[session.files.length - 1].path as string;
+    await addComment(request, lastFile, 5, 'Round me');
+
+    await loadPage(page);
+
+    const section = page.locator('.file-section').last();
+    await section.evaluate(el => el.scrollIntoView({ block: 'start', behavior: 'instant' }));
+    await waitForScrollStable(page);
+    const before = await section.evaluate(el => ({
+      scrollY: window.scrollY,
+      top: el.getBoundingClientRect().top,
+    }));
+    expect(before.scrollY).toBeGreaterThan(100);
+
+    await page.locator('#finishBtn').click();
+    const overlay = page.locator('#waitingOverlay');
+    await expect(overlay).toHaveClass(/active/);
+
+    await request.post('/api/round-complete');
+    await expect(overlay).not.toHaveClass(/active/, { timeout: 5_000 });
+    await waitForScrollStable(page);
+
+    // The rebuild replaces the section node; the locator re-resolves to the new one.
+    const after = await section.evaluate(el => ({
+      scrollY: window.scrollY,
+      top: el.getBoundingClientRect().top,
+    }));
+    expect(after.scrollY).toBeGreaterThan(100);
+    expect(Math.abs(after.top - before.top)).toBeLessThan(50);
+  });
+
   // Hide-resolved is CSS for cards plus a highlight sync — it must not wipe
   // #filesContainer. A full rebuild was both unnecessary and the scroll bug.
   test('toggling hide-resolved preserves file section DOM nodes', async ({ page }) => {
