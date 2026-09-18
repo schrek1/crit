@@ -1918,7 +1918,9 @@
     const sections = document.querySelectorAll('#filesContainer .file-section[id]');
     for (let i = 0; i < sections.length; i++) {
       const rect = sections[i].getBoundingClientRect();
-      if (rect.bottom > 0) return { id: sections[i].id, top: rect.top };
+      if (rect.bottom > 0 && rect.top < window.innerHeight) {
+        return { id: sections[i].id, top: rect.top };
+      }
     }
     return null;
   }
