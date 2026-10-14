@@ -7086,16 +7086,21 @@
         } catch {}
         // Save form drafts and focused element before re-render
         let focusedFormKey = null;
+        let focusedReplyCommentId = null;
         let focusedSelStart = 0;
         let focusedSelEnd = 0;
         const activeEl = document.activeElement;
         if (activeEl && activeEl.tagName === 'TEXTAREA') {
           const formEl = activeEl.closest('.comment-form');
+          // A reply draft lives in .reply-form, outside any .comment-form, so it is keyed by its comment card.
+          const replyCard = activeEl.classList.contains('reply-textarea') ? activeEl.closest('.comment-card') : null;
           if (formEl) {
             focusedFormKey = formEl.dataset.formKey;
-            focusedSelStart = activeEl.selectionStart;
-            focusedSelEnd = activeEl.selectionEnd;
+          } else if (replyCard && replyCard.dataset.commentId) {
+            focusedReplyCommentId = replyCard.dataset.commentId;
           }
+          focusedSelStart = activeEl.selectionStart;
+          focusedSelEnd = activeEl.selectionEnd;
         }
         for (let i = 0; i < files.length; i++) {
           checkAgentReplies(files[i].comments);
@@ -7117,14 +7122,18 @@
         updateCommentCount();
         updateTreeCommentBadges();
         renderCommentsPanel();
-        // Restore focus
+        // Restore focus. Without it, keys typed after the re-render land on the page and fire
+        // single-key shortcuts (d deletes a comment, Shift+F finishes the review).
+        let focusTarget = null;
         if (focusedFormKey) {
-          const ta = document.querySelector('.comment-form[data-form-key="' + focusedFormKey + '"] textarea');
-          if (ta) {
-            ta.focus();
-            ta.selectionStart = focusedSelStart;
-            ta.selectionEnd = focusedSelEnd;
-          }
+          focusTarget = document.querySelector('.comment-form[data-form-key="' + focusedFormKey + '"] textarea');
+        } else if (focusedReplyCommentId) {
+          focusTarget = document.querySelector('.comment-card[data-comment-id="' + focusedReplyCommentId + '"] .reply-textarea');
+        }
+        if (focusTarget) {
+          focusTarget.focus();
+          focusTarget.selectionStart = focusedSelStart;
+          focusTarget.selectionEnd = focusedSelEnd;
         }
       } catch (err) {
         console.error('Error handling comments-changed:', err);

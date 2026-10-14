@@ -98,4 +98,29 @@ test.describe('CLI comment sync — live browser update', () => {
     // SSE should trigger re-fetch; no comment cards remain
     await expect(section.locator('.comment-card')).toHaveCount(0, { timeout: 5000 });
   });
+
+  test('a reply being typed keeps focus when an agent reply arrives via SSE', async ({ page, request }) => {
+    const section = await mdSection(page);
+    const comment = await addComment(request, 'plan.md', 1, 'Reviewer comment');
+    await loadPage(page);
+    await switchToDocumentView(page);
+
+    const card = section.locator('.comment-card[data-comment-id="' + comment.id + '"]');
+    await card.locator('.reply-input').click();
+    const replyTextarea = card.locator('.reply-textarea');
+    await expect(replyTextarea).toBeFocused();
+    await page.keyboard.type('draft reply');
+
+    // An agent reply re-renders the card through comments-changed while the reviewer is mid-sentence.
+    const agentReply = await request.post(
+      `/api/comment/${comment.id}/replies?path=${encodeURIComponent('plan.md')}`,
+      { data: { body: 'Agent reply', author: 'Agent' } },
+    );
+    expect(agentReply.ok()).toBeTruthy();
+    await expect(card.locator('.reply-body')).toContainText('Agent reply', { timeout: 5000 });
+
+    await expect(replyTextarea).toBeFocused();
+    await page.keyboard.type(' continues');
+    await expect(replyTextarea).toHaveValue('draft reply continues');
+  });
 });
