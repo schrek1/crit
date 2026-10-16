@@ -504,6 +504,10 @@ func (s *Session) mergeCommentRepliesAndState(comments []Comment, dc Comment) bo
 			comments[i].ResolvedRound = dc.ResolvedRound
 			changed = true
 		}
+		if newerAgentStatus(mc.AgentStatus, dc.AgentStatus) {
+			comments[i].AgentStatus = dc.AgentStatus
+			changed = true
+		}
 		break
 	}
 	return changed
@@ -562,6 +566,10 @@ func (s *Session) mergeReviewCommentRepliesAndState(dc Comment) bool {
 		}
 		if dc.ResolvedRound != mc.ResolvedRound {
 			s.reviewComments[i].ResolvedRound = dc.ResolvedRound
+			changed = true
+		}
+		if newerAgentStatus(mc.AgentStatus, dc.AgentStatus) {
+			s.reviewComments[i].AgentStatus = dc.AgentStatus
 			changed = true
 		}
 		memRIDs := make(map[string]struct{}, len(mc.Replies))
