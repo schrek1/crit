@@ -520,7 +520,7 @@ func (s *Server) handleConfig(w http.ResponseWriter, r *http.Request) { //nolint
 		"agent_cmd":           s.agentCmd,
 		// Send now can reach an agent waiting on the review; /api/session
 		// reports whether one is there.
-		"agent_session_enabled": true,
+		"agent_instant_replies": s.cfg.AgentInstantReplies,
 
 		// Auth status
 		"auth_logged_in":  selectedErr == nil && selected.Auth.Token != "",
@@ -2619,9 +2619,11 @@ func (s *Server) handleFinish(w http.ResponseWriter, r *http.Request) {
 		eventDataMap["close_on_approve_after_ms"] = ms
 	}
 	eventData, _ := json.Marshal(eventDataMap)
-	// Kept until a review-cycle consumes it: an agent busy with a live
-	// delivery is not subscribed and would miss the event.
-	sess.SetPendingFinish(string(eventData))
+	if s.cfg.AgentInstantReplies {
+		// Kept until a review-cycle consumes it: an agent busy with a live
+		// delivery is not subscribed and would miss the event.
+		sess.SetPendingFinish(string(eventData))
+	}
 	sess.Notify(SSEEvent{
 		Type:    "finish",
 		Content: string(eventData),
@@ -2761,10 +2763,12 @@ func (s *Server) handleReviewCycle(w http.ResponseWriter, r *http.Request) {
 	// again. While it waits, the finish prompt says that instead of
 	// `crit plan --name`.
 	planHook := planHookParam(r, sess)
+	live := planHook == "" && s.cfg.AgentInstantReplies
 	if planHook != "" {
 		sess.SetPlanHook(planHook)
 		defer sess.SetPlanHook("")
-	} else {
+	}
+	if live {
 		// Registered before Subscribe so a caller that sees the subscriber
 		// also sees the listener; a request queued in between is drained below.
 		sess.AgentListenerEnter()
@@ -2779,7 +2783,7 @@ func (s *Server) handleReviewCycle(w http.ResponseWriter, r *http.Request) {
 
 	// After a live delivery the agent comes back mid-round: completing the
 	// round would clear the reviewer's open forms.
-	afterLiveDelivery := planHook == "" && sess.TakeLastCycleLive()
+	afterLiveDelivery := live && sess.TakeLastCycleLive()
 	roundCompleted := false
 	if !sess.IsAwaitingFirstReview() && !afterLiveDelivery {
 		// A kept Finish belongs to the round this call completes; the agent
@@ -2788,7 +2792,7 @@ func (s *Server) handleReviewCycle(w http.ResponseWriter, r *http.Request) {
 		// Agent finished changes — signal round-complete so browser refreshes
 		sess.SignalRoundComplete()
 		roundCompleted = true
-	} else if planHook == "" {
+	} else if live {
 		if content, ok := sess.TakePendingFinish(); ok {
 			s.writeCycleFinish(w, sess, content)
 			return
@@ -2798,7 +2802,7 @@ func (s *Server) handleReviewCycle(w http.ResponseWriter, r *http.Request) {
 	// carries them forward ("file-changed" session); queued requests wait
 	// for that instead of being dropped as unknown comments.
 	awaitingCarryForward := roundCompleted
-	if planHook == "" && !awaitingCarryForward && s.writeLiveDelivery(w, sess) {
+	if live && !awaitingCarryForward && s.writeLiveDelivery(w, sess) {
 		return
 	}
 
@@ -2814,7 +2818,7 @@ func (s *Server) handleReviewCycle(w http.ResponseWriter, r *http.Request) {
 				awaitingCarryForward = false
 			}
 			if (event.Type == "agent-request" || event.Type == "file-changed") &&
-				planHook == "" && !awaitingCarryForward && s.writeLiveDelivery(w, sess) {
+				live && !awaitingCarryForward && s.writeLiveDelivery(w, sess) {
 				return
 			}
 			if event.Type == "server-shutdown" {
@@ -3260,7 +3264,7 @@ func (s *Server) handleAgentRequest(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
-	toWaitingAgent := s.session.Load().AgentLoopActive(time.Now())
+	toWaitingAgent := s.cfg.AgentInstantReplies && s.session.Load().AgentLoopActive(time.Now())
 	if !toWaitingAgent && s.agentCmd == "" {
 		http.Error(w, "no agent: none is waiting on the review and agent_cmd is not configured", http.StatusBadRequest)
 		return
@@ -3296,7 +3300,9 @@ func (s *Server) handleAgentRequest(w http.ResponseWriter, r *http.Request) {
 		})
 		return
 	}
-	sess.SetCommentAgentStatus(filePath, comment.ID, session.AgentStateDelivered, 0)
+	if s.cfg.AgentInstantReplies {
+		sess.SetCommentAgentStatus(filePath, comment.ID, session.AgentStateDelivered, 0)
+	}
 
 	prompt := buildAgentPrompt(comment, filePath)
 
