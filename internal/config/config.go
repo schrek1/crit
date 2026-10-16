@@ -43,6 +43,11 @@ type Config struct {
 	NoIntegrationCheck  bool   `json:"no_integration_check,omitempty"`
 	NoUpdateCheck       bool   `json:"no_update_check,omitempty"`
 	AgentCmd            string `json:"agent_cmd,omitempty"`
+	// AgentInstantReplies opts in to delivering Send now (and the "send every
+	// comment" setting) to the agent waiting on the review, with per-comment
+	// agent status. Off keeps the upstream behaviour unchanged. Global-only,
+	// like agent_cmd, so a repository cannot change how comments reach agents.
+	AgentInstantReplies bool   `json:"agent_instant_replies,omitempty"`
 	AuthToken           string `json:"auth_token,omitempty"`
 	AuthUserName        string `json:"auth_user_name,omitempty"`
 	AuthUserEmail       string `json:"auth_user_email,omitempty"`
