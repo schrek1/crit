@@ -137,13 +137,19 @@ func filesWithUnresolvedComments(sess *Session) []string {
 
 // renderAgentRequestPrompt renders the on_agent_request prompt for comments
 // delivered to the waiting agent mid-round.
-func (s *Server) renderAgentRequestPrompt(comments []comment.ListedComment, nextCommand string) string {
+func (s *Server) renderAgentRequestPrompt(sess *Session, comments []comment.ListedComment, nextCommand string) string {
 	globalPrompts, projectPrompts, trust := s.loadPromptConfig()
 	commentsJSON, _ := json.Marshal(comments)
+	planSlug := ""
+	if sess.Mode == "plan" && sess.PlanDir != "" {
+		planSlug = filepath.Base(sess.PlanDir)
+	}
 	data := map[string]any{
-		"comments_json":  string(commentsJSON),
-		"comment_count":  len(comments),
-		"next_round_cmd": nextCommand,
+		"comments_json":         string(commentsJSON),
+		"comment_count":         len(comments),
+		"next_round_cmd":        nextCommand,
+		"internal_session_mode": sess.Mode,
+		"plan_slug":             planSlug,
 	}
 	result, err := prompt.RenderHook(globalPrompts, projectPrompts, s.projectDir, s.homeDir, trust.UseProject, prompt.HookAgentRequest, data)
 	if err != nil {
