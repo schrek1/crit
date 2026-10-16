@@ -347,6 +347,7 @@ func (s *Session) writeReviewFile(critPath string) error {
 	if s.handleExternalDeletion(critPath) {
 		return nil
 	}
+	s.mergeRepliesWrittenSinceLastWrite(critPath)
 
 	snap := s.snapshotForWrite(critPath)
 	cj := buildCritJSON(snap)
@@ -645,6 +646,84 @@ func (s *Session) SyncCommentsFromDisk() bool {
 	s.mu.Unlock()
 
 	return s.mergeExternalCritJSON()
+}
+
+// mergeRepliesWrittenSinceLastWrite takes into memory the replies that
+// `crit comment --reply-to` wrote to the review file since the daemon's last
+// write. Every write calls it first: the watcher skips its merge while a write
+// is pending, and the write would otherwise overwrite those replies. It takes
+// only replies created since that write, so one the reviewer deleted in the
+// meantime does not come back, and it adds or removes no comments.
+func (s *Session) mergeRepliesWrittenSinceLastWrite(critPath string) {
+	path := ReviewPathsFor(critPath).Review
+	info, err := os.Stat(path)
+	if err != nil {
+		return
+	}
+	s.mu.RLock()
+	lastWrite := s.lastCritJSONMtime
+	s.mu.RUnlock()
+	if info.ModTime().Equal(lastWrite) {
+		return
+	}
+	data, err := ReadFileShared(path)
+	if err != nil {
+		return
+	}
+	var cj CritJSON
+	if err := json.Unmarshal(data, &cj); err != nil {
+		return
+	}
+	// Reply timestamps have whole seconds.
+	since := lastWrite.Truncate(time.Second)
+	changed := false
+	s.mu.Lock()
+	for _, f := range s.Files {
+		if diskFile, ok := cj.Files[f.Path]; ok {
+			for _, dc := range diskFile.Comments {
+				changed = addRepliesCreatedSince(f.Comments, dc, since) || changed
+			}
+		}
+	}
+	for _, dc := range cj.ReviewComments {
+		changed = addRepliesCreatedSince(s.reviewComments, dc, since) || changed
+	}
+	s.mu.Unlock()
+	if changed {
+		s.notify(SSEEvent{Type: "comments-changed"})
+	}
+}
+
+func addRepliesCreatedSince(comments []Comment, dc Comment, since time.Time) bool {
+	for i := range comments {
+		if comments[i].ID != dc.ID {
+			continue
+		}
+		known := make(map[string]struct{}, len(comments[i].Replies))
+		for _, r := range comments[i].Replies {
+			known[r.ID] = struct{}{}
+		}
+		changed := false
+		for _, r := range dc.Replies {
+			if _, ok := known[r.ID]; ok || !createdSince(r.CreatedAt, since) {
+				continue
+			}
+			comments[i].Replies = append(comments[i].Replies, r)
+			changed = true
+		}
+		return changed
+	}
+	return false
+}
+
+// createdSince reports whether a reply was created at or after since; a zero
+// since (nothing written yet) or an unparsable stamp lets the reply in.
+func createdSince(createdAt string, since time.Time) bool {
+	created, err := time.Parse(time.RFC3339, createdAt)
+	if err != nil || since.IsZero() {
+		return true
+	}
+	return !created.Before(since)
 }
 
 func (s *Session) mergeExternalCritJSON() bool {
