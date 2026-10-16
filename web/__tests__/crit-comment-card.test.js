@@ -233,3 +233,29 @@ test('GitLab badge renders when comment.gitlab_note_id is set', () => {
   assert.equal(badges[0].textContent, 'GitLab');
   assert.equal(badges[0].attrs['aria-label'], 'Synced from GitLab');
 });
+
+test('agent status chip shows the effective state', () => {
+  const now = Date.parse('2026-10-16T10:20:00.000Z');
+  const deps = Object.assign(baseDeps(), { now: () => now });
+  const out = card.buildCommentCard(
+    {
+      id: 's1', body: 'x', author: 'Ondra', created_at: '2026-10-16T10:00:00Z',
+      agent_status: { state: 'delivered', updated_at: '2026-10-16T10:00:00.000Z', deadline_at: '2026-10-16T10:15:00.000Z' },
+    },
+    '',
+    { deps: deps }
+  );
+  const chips = findByClass(out.card, 'agent-status');
+  assert.equal(chips.length, 1);
+  assert.equal(chips[0].textContent, 'Agent not responding');
+  assert.equal(chips[0].classList.contains('agent-status-not_responding'), true);
+});
+
+test('no agent status chip without agent_status', () => {
+  const out = card.buildCommentCard(
+    { id: 's2', body: 'x', created_at: '2024-01-01T00:00:00Z' },
+    '',
+    { deps: baseDeps() }
+  );
+  assert.equal(findByClass(out.card, 'agent-status').length, 0);
+});

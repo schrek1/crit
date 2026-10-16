@@ -5408,6 +5408,33 @@ html[data-theme="light"] .toggle-btn.active {
 .live-thread-badge.pulsing {
   animation: badge-pulse 2s ease-in-out infinite;
 }
+
+/* Agent status chip — where a comment sent to the agent is */
+.agent-status {
+  font-size: 10px;
+  font-weight: 600;
+  padding: 1px 6px;
+  border-radius: 3px;
+  white-space: nowrap;
+  color: var(--crit-editor-fg-muted);
+  border: 1px solid var(--crit-border);
+}
+.agent-status-seen,
+.agent-status-working {
+  color: var(--crit-yellow);
+  border-color: var(--crit-yellow-border);
+}
+.agent-status-working {
+  animation: badge-pulse 2s ease-in-out infinite;
+}
+.agent-status-replied {
+  color: var(--crit-green);
+  border-color: var(--crit-green);
+}
+.agent-status-not_responding {
+  color: var(--crit-red);
+  border-color: var(--crit-red);
+}
 @keyframes badge-pulse {
   0%, 100% { opacity: 0.7; }
   50% { opacity: 1; }
