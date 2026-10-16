@@ -7,6 +7,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/tomasz-tomczyk/crit/internal/review"
 )
 
 // startReviewCycle runs POST /api/review-cycle in the background, the way a
@@ -92,6 +94,53 @@ func TestReviewCycle_LiveDeliveryReturnsAgentRequest(t *testing.T) {
 	if got.AgentStatus == nil || got.AgentStatus.State != "delivered" || !got.Live {
 		t.Errorf("comment after delivery: live=%v status=%+v, want live and delivered", got.Live, got.AgentStatus)
 	}
+}
+
+// The agent acts on a delivery at once (crit comment --status / --reply-to
+// write the review file). A debounced daemon write landing after that would
+// overwrite it, so the delivered status must be on disk before review-cycle
+// returns.
+func TestReviewCycle_LiveDeliveryPersistsStatusBeforeReturning(t *testing.T) {
+	s, session := newTestServer(t)
+	session.SetAwaitingFirstReview(true)
+	c, _ := session.AddComment("test.md", 1, 1, "", "persist me", "", "reviewer", "")
+	done := startReviewCycle(t, s, "")
+	waitForSubscriberCount(t, session, 1)
+
+	sendNow(t, s, c.ID, "test.md")
+	awaitCycle(t, done)
+
+	assertDeliveredOnDisk(t, session, c.ID)
+}
+
+func TestReviewCycle_FinishPersistsStatusBeforeReturning(t *testing.T) {
+	s, session := newTestServer(t)
+	session.SetAwaitingFirstReview(true)
+	c, _ := session.AddComment("test.md", 1, 1, "", "persist me", "", "reviewer", "")
+	done := startReviewCycle(t, s, "")
+	waitForSubscriberCount(t, session, 1)
+
+	postFinish(s)
+	awaitCycle(t, done)
+
+	assertDeliveredOnDisk(t, session, c.ID)
+}
+
+func assertDeliveredOnDisk(t *testing.T, session *Session, commentID string) {
+	t.Helper()
+	cj, err := review.LoadCritJSON(session.CritJSONPath())
+	if err != nil {
+		t.Fatalf("loading review file: %v", err)
+	}
+	for _, c := range cj.Files["test.md"].Comments {
+		if c.ID == commentID {
+			if c.AgentStatus == nil || c.AgentStatus.State != "delivered" {
+				t.Errorf("status on disk = %+v, want delivered before review-cycle returns", c.AgentStatus)
+			}
+			return
+		}
+	}
+	t.Fatalf("comment %s not in the review file", commentID)
 }
 
 func TestReviewCycle_QueuedRequestReturnsImmediately(t *testing.T) {
