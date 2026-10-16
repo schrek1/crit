@@ -22,6 +22,8 @@ type commentFlags struct {
 	sessionID        string
 	sessionEntry     *daemon.SessionEntry
 	scope            CommentFocusOverride
+	status           string
+	timeout          string
 	args             []string
 }
 
@@ -107,6 +109,20 @@ func parseCommentFlags(args []string) (commentFlags, error) { //nolint:gocyclo /
 				return f, err
 			}
 			f.scope = override
+			i++
+		case "--status":
+			val, err := clicmd.RequireFlagValue(args, i, "--status")
+			if err != nil {
+				return f, err
+			}
+			f.status = val
+			i++
+		case "--timeout":
+			val, err := clicmd.RequireFlagValue(args, i, "--timeout")
+			if err != nil {
+				return f, err
+			}
+			f.timeout = val
 			i++
 		default:
 			f.args = append(f.args, arg)
