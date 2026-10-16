@@ -220,6 +220,31 @@ test.describe('Send to a waiting agent', () => {
     expect(result.stdout).toContain('unresolved comment');
   });
 
+  test('Send now while the agent works on a Finish batch reaches it after the round completes', async ({ request }) => {
+    const mdPath = await getMdPath(request);
+    const first = await startWaitingAgent(request);
+    runs.push(first);
+    await addComment(request, mdPath, 1, 'finish batch comment');
+    await request.post('/api/finish');
+    await first.done;
+
+    // The agent works on the batch; the reviewer sends a new comment meanwhile.
+    const late = await addComment(request, mdPath, 3, 'sent during the Finish batch');
+    await sendNow(request, late.id, mdPath);
+    await expect.poll(async () => {
+      const file = await request.get(`/api/file/comments?path=${encodeURIComponent(mdPath)}`).then(r => r.json());
+      return file.find((c: { id: string }) => c.id === late.id)?.agent_status?.state;
+    }).toBe('queued');
+    await new Promise((r) => setTimeout(r, 500)); // let the review file catch up
+
+    const next = await startWaitingAgent(request);
+    runs.push(next);
+    const result = await next.done;
+
+    expect(result.stderr).toContain('event: agent_request');
+    expect(result.stdout).toContain('sent during the Finish batch');
+  });
+
   test('status reports from the agent update the chip', async ({ page, request }) => {
     const mdPath = await getMdPath(request);
     const comment = await deliverOne(request, mdPath);
