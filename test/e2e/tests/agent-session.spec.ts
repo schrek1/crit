@@ -30,7 +30,8 @@ function processEnv(fakeHome: string) {
 }
 
 // startWaitingAgent runs the real CLI client against the fixture daemon and
-// resolves once it has registered as a listener.
+// resolves once it has registered as a listener — or has already returned,
+// which it does at once when a request or a Finish was waiting for it.
 async function startWaitingAgent(request: APIRequestContext): Promise<AgentRun> {
   const env = fixtureEnv();
   const session = await request.get('/api/session').then(r => r.json());
@@ -42,10 +43,13 @@ async function startWaitingAgent(request: APIRequestContext): Promise<AgentRun> 
   let stderr = '';
   child.stdout.on('data', (d) => { stdout += d.toString(); });
   child.stderr.on('data', (d) => { stderr += d.toString(); });
+  let exited = false;
   const done = new Promise<{ code: number | null; stdout: string; stderr: string }>((resolve) => {
-    child.on('close', (code) => resolve({ code, stdout, stderr }));
+    child.on('close', (code) => { exited = true; resolve({ code, stdout, stderr }); });
   });
-  await expect.poll(async () => (await request.get('/api/session').then(r => r.json())).agent_listening).toBe(true);
+  await expect.poll(async () =>
+    exited || (await request.get('/api/session').then(r => r.json())).agent_listening
+  ).toBe(true);
   return { done, kill: () => child.kill() };
 }
 
@@ -72,9 +76,11 @@ function statusChip(page: Page, commentId: string) {
 }
 
 // deliverOne makes the agent loop active: one live round trip with a comment.
+// The agent connects first: in a later round its first call completes the
+// previous round, which would drop a comment added just before.
 async function deliverOne(request: APIRequestContext, mdPath: string) {
-  const comment = await addComment(request, mdPath, 3, 'warm-up');
   const run = await startWaitingAgent(request);
+  const comment = await addComment(request, mdPath, 3, 'warm-up');
   await sendNow(request, comment.id, mdPath);
   await run.done;
   return comment;
@@ -95,11 +101,11 @@ test.describe('Send to a waiting agent', () => {
 
   test('Send now reaches the waiting agent and its reply shows as Replied', async ({ page, request }) => {
     const mdPath = await getMdPath(request);
+    const run = await startWaitingAgent(request);
+    runs.push(run);
     const comment = await addComment(request, mdPath, 1, 'Why this heading?');
     await loadPage(page);
     await switchToDocumentView(page);
-    const run = await startWaitingAgent(request);
-    runs.push(run);
 
     const sent = await sendNow(request, comment.id, mdPath);
     const result = await run.done;
