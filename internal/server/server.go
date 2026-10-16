@@ -2780,19 +2780,25 @@ func (s *Server) handleReviewCycle(w http.ResponseWriter, r *http.Request) {
 	// After a live delivery the agent comes back mid-round: completing the
 	// round would clear the reviewer's open forms.
 	afterLiveDelivery := planHook == "" && sess.TakeLastCycleLive()
+	roundCompleted := false
 	if !sess.IsAwaitingFirstReview() && !afterLiveDelivery {
 		// A kept Finish belongs to the round this call completes; the agent
 		// has handled that round, so the Finish is stale.
 		sess.TakePendingFinish()
 		// Agent finished changes — signal round-complete so browser refreshes
 		sess.SignalRoundComplete()
+		roundCompleted = true
 	} else if planHook == "" {
 		if content, ok := sess.TakePendingFinish(); ok {
 			s.writeCycleFinish(w, sess, content)
 			return
 		}
 	}
-	if planHook == "" && s.writeLiveDelivery(w, sess) {
+	// Completing the round clears the in-memory comments until the watcher
+	// carries them forward ("file-changed" session); queued requests wait
+	// for that instead of being dropped as unknown comments.
+	awaitingCarryForward := roundCompleted
+	if planHook == "" && !awaitingCarryForward && s.writeLiveDelivery(w, sess) {
 		return
 	}
 
@@ -2804,7 +2810,11 @@ func (s *Server) handleReviewCycle(w http.ResponseWriter, r *http.Request) {
 				s.writeCycleFinish(w, sess, event.Content)
 				return
 			}
-			if event.Type == "agent-request" && planHook == "" && s.writeLiveDelivery(w, sess) {
+			if event.Type == "file-changed" && event.Content == "session" {
+				awaitingCarryForward = false
+			}
+			if (event.Type == "agent-request" || event.Type == "file-changed") &&
+				planHook == "" && !awaitingCarryForward && s.writeLiveDelivery(w, sess) {
 				return
 			}
 			if event.Type == "server-shutdown" {
