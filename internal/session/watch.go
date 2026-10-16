@@ -492,6 +492,7 @@ func carryForwardComment(old Comment, now string) Comment {
 		ResolvedRound:      old.ResolvedRound,
 		CarriedForward:     true,
 		Live:               old.Live,
+		AgentStatus:        old.AgentStatus,
 		ReviewRound:        old.ReviewRound,
 		Replies:            old.Replies,
 		GitHubID:           old.GitHubID,
