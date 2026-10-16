@@ -371,6 +371,11 @@ func TestFinish_MarksUnansweredCommentsDelivered(t *testing.T) {
 	if gotOpen.AgentStatus == nil || gotOpen.AgentStatus.State != "delivered" {
 		t.Errorf("unanswered comment status = %+v, want delivered", gotOpen.AgentStatus)
 	}
+	// A Finish batch is the classic loop: older agents never report status, so
+	// it must not turn into "agent not responding" while they work.
+	if gotOpen.AgentStatus != nil && gotOpen.AgentStatus.DeadlineAt != "" {
+		t.Errorf("Finish-delivered status has deadline %q, want none", gotOpen.AgentStatus.DeadlineAt)
+	}
 	if gotAnswered.AgentStatus != nil {
 		t.Errorf("answered comment status = %+v, want none", gotAnswered.AgentStatus)
 	}
