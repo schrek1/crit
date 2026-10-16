@@ -76,7 +76,7 @@ var integrationHashes = map[string]string{
 	"integrations/pi/skills/crit/SKILL.md":                       "7691d8d097d20abea69b0c03ec47391550938eea62668a5fdefd5d251bdabdea",
 	"integrations/prompts/examples/on_finish_approved.md":        "d62d9996d95936afd669738d60977dea2641fcf9ddd37c8e9d8d98fae7a7f181",
 	"integrations/prompts/examples/on_finish_unresolved.diff.md": "69b574f50e2614740ec3a5cb3cfcaca2a241ae53e0fe13d5aee053adc5d91e51",
-	"integrations/prompts/on_agent_request.md":                   "df64b2ec2912e19d7b51979b44e1d782a862502caaa370e058037d4033d8b8d8",
+	"integrations/prompts/on_agent_request.md":                   "7c767a953b926117ddc8cafbf6f052cdcbb3b96bc470f1b90c08ea2dc3290dd7",
 	"integrations/prompts/on_finish_approved.md":                 "12b79ce1f7251ca00d16bf9a9af295215a55a3d69c8f264d5002404309b0a4e7",
 	"integrations/prompts/on_finish_approved.story.md":           "6c64b28fbb2923155af010cc3e98fe97fe861f42d4a7e7dbc1c27a73fb31f3e6",
 	"integrations/prompts/on_finish_unresolved.md":               "961e1cd3ef08b521cb59fe440fa590e617105481aa3c24febc63095dc4e6d6f7",
