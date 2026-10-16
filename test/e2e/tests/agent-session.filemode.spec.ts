@@ -135,6 +135,19 @@ test.describe('Files changed mid-round — File Mode', () => {
     fs.writeFileSync(planPath, `${originalPlan}\n\n${marker}\n`);
     const toast = page.locator('.toast-files-changed');
     await expect(toast).toBeVisible({ timeout: 10000 });
+
+    // A second edit keeps the one bar: count the bars at every DOM change.
+    await page.evaluate(() => {
+      const w = window as unknown as { maxFilesChangedBars: number };
+      w.maxFilesChangedBars = 1;
+      new MutationObserver(() => {
+        const bars = document.querySelectorAll('.toast-files-changed').length;
+        w.maxFilesChangedBars = Math.max(w.maxFilesChangedBars, bars);
+      }).observe(document.body, { childList: true, subtree: true });
+    });
+    fs.writeFileSync(planPath, `${originalPlan}\n\n${marker}\n\nSecond edit.\n`);
+    await page.waitForTimeout(2500);
+    expect(await page.evaluate(() => (window as unknown as { maxFilesChangedBars: number }).maxFilesChangedBars)).toBe(1);
     await toast.getByRole('button', { name: 'Show changes' }).click();
 
     await expect(page.locator('body')).toContainText(marker);

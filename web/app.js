@@ -7404,6 +7404,10 @@
     'Show changes starts a new round with the changed files; your comments move with the text and nothing is sent to the agent.';
 
   function showFilesChangedToast() {
+    // One bar however many edits arrive; showToast's dismiss-and-recreate
+    // would stack a new bar on the one still fading out.
+    const shown = document.getElementById('toast-files-changed');
+    if (shown && !shown.classList.contains('toast-out')) return;
     const el = showToast('files-changed', 'files-changed',
       '<span class="toast-files-changed-text"><strong>Files changed, probably the agent.</strong>' +
       '<span class="toast-files-changed-info" tabindex="0" role="img" aria-label="' + FILES_CHANGED_HINT + '" data-hint="' + FILES_CHANGED_HINT + '">i</span></span>' +
