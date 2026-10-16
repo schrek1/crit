@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -392,4 +393,24 @@ func TestSession_ReportsAgentLoop(t *testing.T) {
 	}
 	postFinish(s)
 	awaitCycle(t, done)
+}
+
+// In a `crit plan --name` loop the plain `crit comment` form does not reliably
+// find the plan's review file, so the live prompt must target the plan.
+func TestReviewCycle_LiveDeliveryPromptTargetsPlan(t *testing.T) {
+	s, session := newTestServer(t)
+	session.Mode = "plan"
+	session.PlanDir = filepath.Join(t.TempDir(), "my-plan")
+	session.SetAwaitingFirstReview(true)
+	c, _ := session.AddComment("test.md", 1, 1, "", "plan question", "", "reviewer", "")
+	done := startReviewCycle(t, s, "")
+	waitForSubscriberCount(t, session, 1)
+
+	sendNow(t, s, c.ID, "test.md")
+	resp := awaitCycle(t, done)
+
+	prompt, _ := resp["prompt"].(string)
+	if !strings.Contains(prompt, "crit comment --plan my-plan --reply-to") || !strings.Contains(prompt, "crit comment --plan my-plan --status seen") {
+		t.Errorf("plan-mode prompt = %q, want --plan my-plan on reply and status commands", prompt)
+	}
 }
