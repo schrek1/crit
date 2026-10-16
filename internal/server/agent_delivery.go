@@ -124,9 +124,8 @@ func (s *Server) writeCycleFinish(w http.ResponseWriter, sess *Session, content 
 // comments. The agent's `crit comment` writes that file at once, and a
 // debounced daemon write landing afterwards would overwrite its reply.
 func flushBeforeAgentActs(sess *Session) {
-	// The agent may have written a reply or status since the watcher's last
-	// merge; take it in first so this write keeps it.
-	sess.MergeAgentWritesFromDisk()
+	// The write first takes in any reply or status the agent wrote since the
+	// last one (see MergeAgentWritesFromDisk), so it does not overwrite them.
 	if err := sess.SyncWriteFiles(); err != nil {
 		log.Printf("agent delivery: writing review file: %v", err)
 	}
