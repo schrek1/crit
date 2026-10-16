@@ -25,6 +25,7 @@ type Context struct {
 	Approved               bool
 	InternalSessionMode    string // files | git | plan — for default action builders
 	PlanHook               string // plan_mode | codex when a plan hook waits on the review
+	AgentInstantReplies    bool   // agent_instant_replies is on: ask for status reports
 }
 
 // TemplateData returns a map with snake_case keys for text/template.
@@ -45,6 +46,7 @@ func (c Context) TemplateData() map[string]any {
 		"approved":                 c.Approved,
 		"internal_session_mode":    c.InternalSessionMode,
 		"plan_hook":                c.PlanHook,
+		"agent_instant_replies":    c.AgentInstantReplies,
 	}
 	if c.SessionStats != nil {
 		data["session_stats"] = map[string]any{
