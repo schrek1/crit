@@ -7900,7 +7900,7 @@
   // An agent answering a live comment can edit the files mid-round; the page
   // shows them only in the next round, which the reviewer may start now.
   const FILES_CHANGED_HINT = 'You still see the version from the start of this round, so nothing moves while you read. ' +
-    'Show changes starts a new round with the changed files; your comments move with the text and nothing is sent to the agent.';
+    'Show changes (Shift+R) starts a new round with the changed files; your comments move with the text and nothing is sent to the agent.';
 
   function showFilesChangedToast() {
     // One bar however many edits arrive; showToast's dismiss-and-recreate
@@ -7912,7 +7912,7 @@
       '<span class="toast-files-changed-info" tabindex="0" role="img" aria-label="' + FILES_CHANGED_HINT + '" data-hint="' + FILES_CHANGED_HINT + '">i</span></span>' +
       '<div class="toast-actions">' +
       '<button type="button" class="toast-btn toast-btn-ghost" data-dismiss-toast="files-changed">Not now</button>' +
-      '<button type="button" class="toast-btn toast-btn-filled" data-next-round title="Start a new review round with the changed files">Show changes</button>' +
+      '<button type="button" class="toast-btn toast-btn-filled" data-next-round title="Start a new review round with the changed files (Shift+R)">Show changes</button>' +
       '</div>');
     const nextBtn = el.querySelector('[data-next-round]');
     nextBtn.addEventListener('click', async function() {
@@ -9637,6 +9637,13 @@
         // The file stayed open (un-viewed, or expanded): keep the focused
         // line highlighted, as Esc does when it leaves visual mode.
         if (leftVisual && file && !file.collapsed) showPierreFocus();
+        break;
+      }
+      case 'show_changes': {
+        const showChangesBtn = document.querySelector('#toast-files-changed:not(.toast-out) [data-next-round]');
+        if (!showChangesBtn) return;
+        e.preventDefault();
+        showChangesBtn.click();
         break;
       }
       case 'general_comment': {
