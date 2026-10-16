@@ -17,6 +17,7 @@ Prompt hooks are **templates** (Go `text/template`), not shell commands. They fe
 | `on_finish_approved` | Approve with zero unresolved comments (fallback) |
 | `on_finish_approved:files` / `:diff` / `:story` / `:live` / `:preview` | Mode-specific approve hooks |
 | `on_story_generate` | Before `crit story` builds the prompt sent to `agent_cmd` to author a story, and when `crit story --guide` resolves the guide to print |
+| `on_agent_request` | Comments are delivered mid-round to the agent waiting on the review (Send now, or the option to send every comment). No `:mode` split. Variables: `{{.comments_json}}` (the delivered comments), `{{.comment_count}}`, `{{.next_round_cmd}}` |
 
 Resolution order for e.g. `on_finish_unresolved` in a PR review:
 
@@ -89,6 +90,7 @@ Config keys use `:` for mode suffixes; filenames use `.` instead (e.g. `on_finis
 | [`integrations/prompts/on_finish_unresolved.md`](../integrations/prompts/on_finish_unresolved.md) | Stock unresolved finish (count, embedded comments, actions, reconnect) |
 | [`integrations/prompts/on_finish_unresolved.story.md`](../integrations/prompts/on_finish_unresolved.story.md) | Stock story-mode unresolved finish with instructions to edit source files, not saved story JSON |
 | [`integrations/prompts/on_story_generate.md`](../integrations/prompts/on_story_generate.md) | Stock story authoring guide - the **entire** prompt sent to `agent_cmd` for `crit story`, principles + JSON shape included |
+| [`integrations/prompts/on_agent_request.md`](../integrations/prompts/on_agent_request.md) | Stock mid-round delivery to the waiting agent: the comments, status reports, reply command, and that the loop goes on |
 | [`integrations/prompts/examples/`](../integrations/prompts/examples/) | Optional playbooks (large-PR batching, AGENTS.md extraction, etc.) |
 
 Copy the defaults with `cd ~ && crit install prompts` (global) or `crit install prompts` from your repo root, wire them in `.crit.config.json` if you use non-standard paths, and customize from there.
