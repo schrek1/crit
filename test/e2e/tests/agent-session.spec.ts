@@ -172,28 +172,7 @@ test.describe('Send to a waiting agent', () => {
     await expect(statusChip(page, comment.id)).toHaveText('Delivered');
   });
 
-  test('the Send every comment option delivers a plain comment', async ({ page, request }) => {
-    await page.context().addCookies([{
-      name: 'crit-settings',
-      value: encodeURIComponent(JSON.stringify({ diffScope: 'all', autoSendToAgent: true })),
-      domain: 'localhost',
-      path: '/',
-    }]);
-    const run = await startWaitingAgent(request);
-    runs.push(run);
-    await loadPage(page);
-    const doc = await switchToDocumentView(page);
-
-    const textarea = await openDocLineComment(page, doc);
-    await textarea.fill('auto-sent comment');
-    await doc.locator('.comment-form .btn-primary').last().click();
-    const result = await run.done;
-
-    expect(result.stderr).toContain('event: agent_request');
-    expect(result.stdout).toContain('auto-sent comment');
-  });
-
-  test('without the option a plain comment waits for Finish', async ({ page, request }) => {
+  test('a plain Comment waits for Finish', async ({ page, request }) => {
     const run = await startWaitingAgent(request);
     runs.push(run);
     await loadPage(page);

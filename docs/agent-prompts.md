@@ -17,7 +17,7 @@ Prompt hooks are **templates** (Go `text/template`), not shell commands. They fe
 | `on_finish_approved` | Approve with zero unresolved comments (fallback) |
 | `on_finish_approved:files` / `:diff` / `:story` / `:live` / `:preview` | Mode-specific approve hooks |
 | `on_story_generate` | Before `crit story` builds the prompt sent to `agent_cmd` to author a story, and when `crit story --guide` resolves the guide to print |
-| `on_agent_request` | Comments are delivered mid-round to the agent waiting on the review (Send now, or the option to send every comment). No `:mode` split. Variables: `{{.comments_json}}` (the delivered comments), `{{.comment_count}}`, `{{.next_round_cmd}}` |
+| `on_agent_request` | Comments are delivered mid-round to the agent waiting on the review (Send now, or a reply in a live thread). No `:mode` split. Variables: `{{.comments_json}}` (the delivered comments), `{{.comment_count}}`, `{{.next_round_cmd}}` |
 
 Resolution order for e.g. `on_finish_unresolved` in a PR review:
 
