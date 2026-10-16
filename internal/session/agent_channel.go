@@ -103,6 +103,17 @@ func (s *Session) AgentLoopActive(now time.Time) bool {
 	return s.agent.everListened && now.Sub(s.agent.lastExit) < DefaultAgentTimeout
 }
 
+// AgentLoopActiveUntil returns when the grace after the last agent left ends,
+// or false while an agent listens or none ever did.
+func (s *Session) AgentLoopActiveUntil() (time.Time, bool) {
+	s.agent.mu.Lock()
+	defer s.agent.mu.Unlock()
+	if s.agent.listeners > 0 || !s.agent.everListened {
+		return time.Time{}, false
+	}
+	return s.agent.lastExit.Add(DefaultAgentTimeout), true
+}
+
 // SetPendingFinish keeps a Finish event that no agent was waiting for, so the
 // next review-cycle returns it instead of blocking until the next round.
 func (s *Session) SetPendingFinish(content string) {
