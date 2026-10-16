@@ -497,6 +497,8 @@
   // An agent waits on the review through `crit` (or just left to work on a
   // delivery); Send now reaches it without agent_cmd.
   let agentLoopActive = false;
+  // The agent waits on review-cycle right now, so it is alive.
+  let agentListening = false;
   const pendingAgentRequests = new Set();
 
   // Track active reply form state so it survives DOM re-renders (commentId → { text })
@@ -1040,6 +1042,7 @@
     sessionRes = await hydrateFullSessionForStoryIfNeeded(sessionRes);
     session = sessionRes;
     agentLoopActive = !!sessionRes.agent_loop_active;
+    agentListening = !!sessionRes.agent_listening;
     reviewComments = sessionRes.review_comments || [];
 
     // Fire-and-forget: verify file list endpoint is available for @-mention autocomplete
@@ -5629,6 +5632,7 @@
       if (!res.ok) return;
       const info = await res.json();
       agentLoopActive = !!info.agent_loop_active;
+      agentListening = !!info.agent_listening;
     } catch {
       // Keep the last known state; the next agent-status event retries.
     }
@@ -5672,6 +5676,7 @@
       authorColorIndex: authorColorIndex,
       getReviewRound: function () { return session && session.review_round; },
       getAgentName: pendingAgentName,
+      isAgentListening: function () { return agentListening; },
       buildCommentEnv: buildCommentEnv,
       renderReplyList: renderReplyList,
       createReplyInput: createReplyInput,
