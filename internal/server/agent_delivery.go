@@ -35,7 +35,7 @@ func (s *Server) writeLiveDelivery(w http.ResponseWriter, sess *Session) bool {
 		"status":       "agent_request",
 		"event":        "agent_request",
 		"approved":     false,
-		"prompt":       s.renderAgentRequestPrompt(delivered, nextCommand),
+		"prompt":       s.renderAgentRequestPrompt(sess, delivered, nextCommand),
 		"comments":     delivered,
 		"next_command": nextCommand,
 	})
