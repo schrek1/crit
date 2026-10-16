@@ -172,6 +172,8 @@ func TestReviewCycle_NoRoundCompleteAfterLiveDelivery(t *testing.T) {
 	session.SetAwaitingFirstReview(false)
 	first := startReviewCycle(t, s, "")
 	waitForSubscriberCount(t, session, 1)
+	// No watcher runs in unit tests; signal its carry-forward as it would.
+	session.Notify(SSEEvent{Type: "file-changed", Content: "session"})
 	c, _ := session.AddComment("test.md", 1, 1, "", "keep me", "", "reviewer", "")
 	sendNow(t, s, c.ID, "test.md")
 	if resp := awaitCycle(t, first); resp["status"] != "agent_request" {
@@ -190,11 +192,12 @@ func TestReviewCycle_NoRoundCompleteAfterLiveDelivery(t *testing.T) {
 	awaitCycle(t, next)
 }
 
-func TestReviewCycle_RoundCompleteDropsQueuedRequests(t *testing.T) {
+func TestReviewCycle_RoundCompleteKeepsQueuedRequests(t *testing.T) {
 	s, session := newTestServer(t)
-	// The agent is busy with a Finish batch; a request queued now belongs to
-	// the round its next `crit` call completes, and the Finish already carried
-	// every unresolved comment.
+	// The agent is busy with a Finish batch and the reviewer sends a new
+	// comment. The agent's next call completes the round, which clears the
+	// in-memory comments until the watcher carries them forward — the
+	// request must wait for that, not be dropped (no watcher runs here).
 	session.SetAwaitingFirstReview(false)
 	c, _ := session.AddComment("test.md", 1, 1, "", "sent during the Finish batch", "", "reviewer", "")
 	markAgentLoopActive(session)
@@ -204,8 +207,8 @@ func TestReviewCycle_RoundCompleteDropsQueuedRequests(t *testing.T) {
 	waitForSubscriberCount(t, session, 1)
 
 	assertCycleStillWaiting(t, done)
-	if left := session.DrainAgentRequests(); len(left) != 0 {
-		t.Errorf("queue after round complete = %+v, want empty", left)
+	if left := session.DrainAgentRequests(); len(left) != 1 || left[0].CommentID != c.ID {
+		t.Errorf("queue after round complete = %+v, want the request kept for after carry-forward", left)
 	}
 	postFinish(s)
 	awaitCycle(t, done)
