@@ -138,6 +138,7 @@ Templates receive these variables (snake_case in templates):
 | `{{.comments_all_cmd}}` | All comments - `crit comments --json --all '…'` |
 | `{{.next_round_cmd}}` | Command to start the next round (`crit`, `crit --session …`, `crit plan …`). Empty when a plan hook started the round |
 | `{{.plan_hook}}` | Set when a plan hook is waiting on the review: `plan_mode` (agent exits plan mode again) or `codex` (agent ends its turn with the plan). Empty otherwise |
+| `{{.agent_instant_replies}}` | `true` when the global `agent_instant_replies` config key is on. The stock templates ask for `crit comment --status` reports only then |
 | `{{.session_key}}` | Daemon session key |
 | `{{.mode}}` | `files`, `diff`, `live`, or `preview` |
 | `{{.unresolved_count}}` | Open comments at finish time |
