@@ -2,6 +2,7 @@ package session
 
 import (
 	"encoding/json"
+	"os"
 	"time"
 )
 
@@ -112,13 +113,25 @@ func (s *Session) SetCommentAgentStatus(filePath, commentID, state string, timeo
 }
 
 // MergeAgentWritesFromDisk adopts what the agent wrote to the review file
-// with `crit comment` — replies and agent status — into memory, even while a
-// daemon write is pending. Call it before a write the agent is about to rely
-// on: the watcher skips its merge while a write is pending, and the write
-// would otherwise overwrite the agent's reply. It adds or removes no comments
-// and leaves resolution alone, so the reviewer's unwritten edits stand.
+// with `crit comment` since the daemon's last write — replies and agent
+// status — into memory, even while a daemon write is pending. Every daemon
+// write calls it first: the watcher skips its merge while a write is pending,
+// and the write would otherwise overwrite the agent's reply. It adds or
+// removes no comments and leaves resolution alone, and it takes only replies
+// created since that last write, so a reply the reviewer deleted stays gone.
 func (s *Session) MergeAgentWritesFromDisk() bool {
-	data, err := ReadFileShared(ReviewPathsFor(s.critJSONPath()).Review)
+	path := ReviewPathsFor(s.critJSONPath()).Review
+	info, err := os.Stat(path)
+	if err != nil {
+		return false
+	}
+	s.mu.RLock()
+	lastWrite := s.lastCritJSONMtime
+	s.mu.RUnlock()
+	if info.ModTime().Equal(lastWrite) {
+		return false
+	}
+	data, err := ReadFileShared(path)
 	if err != nil {
 		return false
 	}
@@ -126,17 +139,19 @@ func (s *Session) MergeAgentWritesFromDisk() bool {
 	if err := json.Unmarshal(data, &cj); err != nil {
 		return false
 	}
+	// Reply timestamps have whole seconds.
+	since := lastWrite.Truncate(time.Second)
 	changed := false
 	s.mu.Lock()
 	for _, f := range s.Files {
 		if diskFile, ok := cj.Files[f.Path]; ok {
 			for _, dc := range diskFile.Comments {
-				changed = mergeAgentWrites(f.Comments, dc) || changed
+				changed = mergeAgentWrites(f.Comments, dc, since) || changed
 			}
 		}
 	}
 	for _, dc := range cj.ReviewComments {
-		changed = mergeAgentWrites(s.reviewComments, dc) || changed
+		changed = mergeAgentWrites(s.reviewComments, dc, since) || changed
 	}
 	s.mu.Unlock()
 	if changed {
@@ -145,7 +160,7 @@ func (s *Session) MergeAgentWritesFromDisk() bool {
 	return changed
 }
 
-func mergeAgentWrites(comments []Comment, dc Comment) bool {
+func mergeAgentWrites(comments []Comment, dc Comment, since time.Time) bool {
 	for i := range comments {
 		if comments[i].ID != dc.ID {
 			continue
@@ -156,10 +171,11 @@ func mergeAgentWrites(comments []Comment, dc Comment) bool {
 			known[r.ID] = struct{}{}
 		}
 		for _, r := range dc.Replies {
-			if _, ok := known[r.ID]; !ok {
-				comments[i].Replies = append(comments[i].Replies, r)
-				changed = true
+			if _, ok := known[r.ID]; ok || !createdSince(r.CreatedAt, since) {
+				continue
 			}
+			comments[i].Replies = append(comments[i].Replies, r)
+			changed = true
 		}
 		if newerAgentStatus(comments[i].AgentStatus, dc.AgentStatus) {
 			comments[i].AgentStatus = dc.AgentStatus
@@ -168,6 +184,16 @@ func mergeAgentWrites(comments []Comment, dc Comment) bool {
 		return changed
 	}
 	return false
+}
+
+// createdSince reports whether a reply was created at or after since; a zero
+// since (nothing written yet) or an unparsable stamp lets the reply in.
+func createdSince(createdAt string, since time.Time) bool {
+	created, err := time.Parse(time.RFC3339, createdAt)
+	if err != nil || since.IsZero() {
+		return true
+	}
+	return !created.Before(since)
 }
 
 // newerAgentStatus reports whether disk should replace mem.

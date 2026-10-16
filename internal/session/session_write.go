@@ -324,6 +324,7 @@ func (s *Session) writeFilesErr() error {
 	if s.handleExternalDeletion(critPath) {
 		return nil
 	}
+	s.MergeAgentWritesFromDisk()
 
 	snap := s.snapshotForWrite(critPath)
 	cj := buildCritJSON(snap)
