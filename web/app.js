@@ -317,13 +317,16 @@
 
   // Bind Ctrl/Cmd+Enter (submit) and Escape (cancel) to a text input/textarea.
   // opts.stopPropagation defaults to true (matches comment-form keydown behavior).
+  // opts.onShiftSubmit, when set, takes Ctrl/Cmd+Shift+Enter instead of onSubmit.
   function bindSubmitCancelKeys(el, onSubmit, onCancel, opts) {
     const stop = !opts || opts.stopPropagation !== false;
+    const onShiftSubmit = opts && opts.onShiftSubmit;
     el.addEventListener('keydown', function(e) {
       if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) {
         e.preventDefault();
         if (stop) e.stopPropagation();
-        onSubmit(e);
+        if (e.shiftKey && onShiftSubmit) onShiftSubmit(e);
+        else onSubmit(e);
       } else if (e.key === 'Escape') {
         e.preventDefault();
         if (stop) e.stopPropagation();
@@ -4771,7 +4774,11 @@
       ? function() { if (confirmDiscardReviewCommentForm()) opts.onCancel(); }
       : function() { if (confirmDiscardCommentForm(formObj)) cancelComment(formObj); };
 
-    bindSubmitCancelKeys(textarea, doSubmit, doCancelFromEsc);
+    // Ctrl/Cmd+Shift+Enter is Send now while the button is shown, else a plain Comment.
+    let sendNow = null;
+    bindSubmitCancelKeys(textarea, doSubmit, doCancelFromEsc, {
+      onShiftSubmit: function() { if (sendNow) sendNow(); else doSubmit(); },
+    });
 
     if (!opts.onSubmit) {
       textarea.addEventListener('input', function() { debouncedSaveDraft(textarea.value, formObj); });
@@ -4798,7 +4805,7 @@
       const sendBtn = document.createElement('button');
       sendBtn.className = 'btn btn-sm btn-agent';
       sendBtn.innerHTML = '<svg viewBox="0 0 24 24" width="12" height="12" fill="currentColor" style="vertical-align: -1px"><polygon points="13 2 3 14 12 14 11 22 21 10 12 10"/></svg> Send now';
-      sendBtn.title = 'Submit comment and send to agent';
+      sendBtn.title = 'Submit comment and send to agent (Ctrl+Shift+Enter)';
       sendBtn.addEventListener('click', async function() {
         sendBtn.disabled = true;
         submitBtn.disabled = true;
@@ -4833,6 +4840,7 @@
         }
       });
       actions.appendChild(sendBtn);
+      sendNow = function() { if (!sendBtn.disabled) sendBtn.click(); };
     }
 
     form.appendChild(header);
