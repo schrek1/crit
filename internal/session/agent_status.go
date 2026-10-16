@@ -1,6 +1,9 @@
 package session
 
-import "time"
+import (
+	"encoding/json"
+	"time"
+)
 
 // Agent status states stored on a comment. Replied and NotResponding are never
 // stored: EffectiveAgentState derives them from replies and the deadline.
@@ -106,6 +109,65 @@ func (s *Session) SetCommentAgentStatus(filePath, commentID, state string, timeo
 		s.notify(SSEEvent{Type: "comments-changed"})
 	}
 	return found
+}
+
+// MergeAgentWritesFromDisk adopts what the agent wrote to the review file
+// with `crit comment` — replies and agent status — into memory, even while a
+// daemon write is pending. Call it before a write the agent is about to rely
+// on: the watcher skips its merge while a write is pending, and the write
+// would otherwise overwrite the agent's reply. It adds or removes no comments
+// and leaves resolution alone, so the reviewer's unwritten edits stand.
+func (s *Session) MergeAgentWritesFromDisk() bool {
+	data, err := ReadFileShared(ReviewPathsFor(s.critJSONPath()).Review)
+	if err != nil {
+		return false
+	}
+	var cj CritJSON
+	if err := json.Unmarshal(data, &cj); err != nil {
+		return false
+	}
+	changed := false
+	s.mu.Lock()
+	for _, f := range s.Files {
+		if diskFile, ok := cj.Files[f.Path]; ok {
+			for _, dc := range diskFile.Comments {
+				changed = mergeAgentWrites(f.Comments, dc) || changed
+			}
+		}
+	}
+	for _, dc := range cj.ReviewComments {
+		changed = mergeAgentWrites(s.reviewComments, dc) || changed
+	}
+	s.mu.Unlock()
+	if changed {
+		s.notify(SSEEvent{Type: "comments-changed"})
+	}
+	return changed
+}
+
+func mergeAgentWrites(comments []Comment, dc Comment) bool {
+	for i := range comments {
+		if comments[i].ID != dc.ID {
+			continue
+		}
+		changed := false
+		known := make(map[string]struct{}, len(comments[i].Replies))
+		for _, r := range comments[i].Replies {
+			known[r.ID] = struct{}{}
+		}
+		for _, r := range dc.Replies {
+			if _, ok := known[r.ID]; !ok {
+				comments[i].Replies = append(comments[i].Replies, r)
+				changed = true
+			}
+		}
+		if newerAgentStatus(comments[i].AgentStatus, dc.AgentStatus) {
+			comments[i].AgentStatus = dc.AgentStatus
+			changed = true
+		}
+		return changed
+	}
+	return false
 }
 
 // newerAgentStatus reports whether disk should replace mem.
