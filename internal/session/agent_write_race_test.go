@@ -93,6 +93,12 @@ func TestDaemonWrite_DoesNotBringBackAReplyTheReviewerDeleted(t *testing.T) {
 	if err := s.SyncWriteFiles(); err != nil {
 		t.Fatal(err)
 	}
+	// The deleted reply and the daemon's last write fall in the same second,
+	// as they do on a fast machine.
+	created, _ := time.Parse(time.RFC3339, old.CreatedAt)
+	s.mu.Lock()
+	s.lastCritJSONMtime = created.Add(500 * time.Millisecond)
+	s.mu.Unlock()
 	cliAddReply(t, s, c.ID, "r_cli", "Written as proposed.")
 	s.DeleteReply("plan.md", c.ID, old.ID)
 
