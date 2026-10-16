@@ -724,6 +724,9 @@ func (s *Server) handleSession(w http.ResponseWriter, r *http.Request) {
 		ProxyPort       int    `json:"proxy_port,omitempty"`
 		AgentListening  bool   `json:"agent_listening"`
 		AgentLoopActive bool   `json:"agent_loop_active"`
+		// AgentLoopUntil is when the loop stops counting as active unless the
+		// agent comes back; set only while no agent listens.
+		AgentLoopUntil string `json:"agent_loop_until,omitempty"`
 	}
 	resp := liveSessionResponse{SessionInfo: info}
 	if session != nil {
@@ -732,6 +735,9 @@ func (s *Server) handleSession(w http.ResponseWriter, r *http.Request) {
 		resp.ProxyPort = session.ProxyPort
 		resp.AgentListening = session.HasAgentListener()
 		resp.AgentLoopActive = session.AgentLoopActive(time.Now())
+		if until, ok := session.AgentLoopActiveUntil(); ok {
+			resp.AgentLoopUntil = until.UTC().Format(time.RFC3339Nano)
+		}
 	}
 	writeJSON(w, resp)
 }

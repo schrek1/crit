@@ -2,6 +2,7 @@ package server
 
 import (
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
@@ -467,5 +468,28 @@ func writeAgentReplyOnDisk(t *testing.T, session *Session, commentID, replyID, b
 	cj.Files["test.md"] = f
 	if err := review.SaveCritJSON(session.CritJSONPath(), cj); err != nil {
 		t.Fatal(err)
+	}
+}
+
+// Between two crit calls the loop counts as active for a grace period; the
+// browser needs its end to stop offering Send now when the agent is gone.
+func TestSession_ReportsAgentLoopExpiry(t *testing.T) {
+	s, session := newTestServer(t)
+	markAgentLoopActive(session)
+	left := time.Now()
+
+	w := httptest.NewRecorder()
+	s.ServeHTTP(w, httptest.NewRequest("GET", "/api/session", nil))
+
+	var resp map[string]any
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatal(err)
+	}
+	until, err := time.Parse(time.RFC3339Nano, fmt.Sprint(resp["agent_loop_until"]))
+	if err != nil {
+		t.Fatalf("agent_loop_until = %v, want a timestamp: %v", resp["agent_loop_until"], err)
+	}
+	if d := until.Sub(left); d < 14*time.Minute || d > 16*time.Minute {
+		t.Errorf("agent_loop_until is %v after the agent left, want ~15m", d)
 	}
 }
