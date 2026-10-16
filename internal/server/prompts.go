@@ -42,6 +42,7 @@ func (s *Server) buildPromptContext(sess *Session, approved bool, stats map[stri
 		Approved:            approved,
 		InternalSessionMode: sess.Mode,
 		PlanHook:            sess.PlanHook(),
+		AgentInstantReplies: s.cfg.AgentInstantReplies,
 	}
 	if sess.Mode == "plan" && sess.PlanDir != "" {
 		ctx.PlanSlug = filepath.Base(sess.PlanDir)
