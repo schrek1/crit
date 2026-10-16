@@ -7166,6 +7166,7 @@
     const conn = window.crit.sse.createSSE('/api/events', {
       'file-changed': async function() {
       try {
+        dismissToast('files-changed');
         // Reset action tracking for new round
         userActedThisRound = false;
 
@@ -7270,6 +7271,8 @@
           if (waitingNotApproved) {
             document.getElementById('waitingMessage').textContent = 'Waiting for your agent to finish...';
           }
+        } else if (instantReplies && uiState === 'reviewing') {
+          showFilesChangedToast();
         }
       } catch {}
       },
@@ -7475,6 +7478,34 @@
       setTimeout(function() { dismissToast(id); }, 4000);
     }
     return el;
+  }
+
+  // An agent answering a live comment can edit the files mid-round; the page
+  // shows them only in the next round, which the reviewer may start now.
+  const FILES_CHANGED_HINT = 'You still see the version from the start of this round, so nothing moves while you read. ' +
+    'Show changes starts a new round with the changed files; your comments move with the text and nothing is sent to the agent.';
+
+  function showFilesChangedToast() {
+    const el = showToast('files-changed', 'files-changed',
+      '<span class="toast-files-changed-text"><strong>Files changed, probably the agent.</strong>' +
+      '<span class="toast-files-changed-info" tabindex="0" role="img" aria-label="' + FILES_CHANGED_HINT + '" data-hint="' + FILES_CHANGED_HINT + '">i</span></span>' +
+      '<div class="toast-actions">' +
+      '<button type="button" class="toast-btn toast-btn-ghost" data-dismiss-toast="files-changed">Not now</button>' +
+      '<button type="button" class="toast-btn toast-btn-filled" data-next-round title="Start a new review round with the changed files">Show changes</button>' +
+      '</div>');
+    const nextBtn = el.querySelector('[data-next-round]');
+    nextBtn.addEventListener('click', async function() {
+      nextBtn.disabled = true;
+      try {
+        const res = await fetch('/api/round-complete', { method: 'POST' });
+        if (!res.ok) throw new Error('Server returned ' + res.status);
+        dismissToast('files-changed');
+      } catch (err) {
+        console.error('Error starting the next round:', err);
+        showMiniToast('Failed to start the next round');
+        nextBtn.disabled = false;
+      }
+    });
   }
 
   function dismissToast(id) {
