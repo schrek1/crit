@@ -1,5 +1,7 @@
 import { test, expect, type APIRequestContext, type Page } from '@playwright/test';
-import { addComment, clearAllComments, loadPage } from './helpers';
+import * as fs from 'fs';
+import * as path from 'path';
+import { addComment, clearAllComments, loadPage, roundComplete, sessionCwd } from './helpers';
 
 // ============================================================
 // Send to a waiting agent — File Mode (plan and document reviews).
@@ -109,5 +111,33 @@ test.describe('Send to a waiting agent — File Mode', () => {
 
     expect(resp.status).toBe('agent_request');
     expect(String(resp.prompt)).toContain('sent during the batch');
+  });
+});
+
+// Files changed mid-round (e.g. the agent editing them after Send now) show
+// only in the next round; the toast lets the reviewer start it.
+test.describe('Files changed mid-round — File Mode', () => {
+  let planPath: string;
+  let originalPlan: string;
+  test.beforeAll(async ({ request }) => {
+    planPath = path.join(await sessionCwd(request), 'plan.md');
+    originalPlan = fs.readFileSync(planPath, 'utf-8');
+  });
+  test.afterAll(async ({ request }) => {
+    fs.writeFileSync(planPath, originalPlan);
+    await roundComplete(request);
+  });
+
+  test('the changed-files toast starts the next round', async ({ page }) => {
+    await loadPage(page);
+    const marker = 'Edited mid-round ' + Date.now();
+
+    fs.writeFileSync(planPath, `${originalPlan}\n\n${marker}\n`);
+    const toast = page.locator('.toast-files-changed');
+    await expect(toast).toBeVisible({ timeout: 10000 });
+    await toast.getByRole('button', { name: 'Show changes' }).click();
+
+    await expect(page.locator('body')).toContainText(marker);
+    await expect(toast).toHaveCount(0);
   });
 });

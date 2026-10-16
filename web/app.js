@@ -7779,8 +7779,14 @@
         // but the page's file content is only refreshed by round-complete, so
         // offer a reload.
         // Git mode is left alone: its edits arrive as the next round.
-        if (uiState === 'reviewing' && session.mode !== 'git') {
+        // With instant replies the page keeps the round-start text, so the
+        // bar offers the next round instead of an in-place reload.
+        if (uiState === 'reviewing' && instantReplies) {
           showFilesChangedToast();
+          return;
+        }
+        if (uiState === 'reviewing' && session.mode !== 'git') {
+          showFilesReloadToast();
           return;
         }
         const count = parseInt(data.content, 10);
@@ -8146,7 +8152,7 @@
   // mode). File content is otherwise only refreshed by round-complete, so
   // offer to refresh the files in place the same way, without starting a
   // new round. Shown once until dismissed or refreshed.
-  function showFilesChangedToast() {
+  function showFilesReloadToast() {
     const existing = document.getElementById('toast-files-changed');
     if (existing && !existing.classList.contains('toast-out')) return;
     const el = showToast('files-changed', 'info',
@@ -8164,7 +8170,35 @@
         if (await refetchReviewFiles()) rerenderReview();
       } catch (err) {
         console.error('Error reloading changed files:', err);
-        showFilesChangedToast();
+        showFilesReloadToast();
+      }
+    });
+  }
+
+  // An agent answering a live comment can edit the files mid-round; the page
+  // shows them only in the next round, which the reviewer may start now.
+  const FILES_CHANGED_HINT = 'You still see the version from the start of this round, so nothing moves while you read. ' +
+    'Show changes starts a new round with the changed files; your comments move with the text and nothing is sent to the agent.';
+
+  function showFilesChangedToast() {
+    const el = showToast('files-changed', 'files-changed',
+      '<span class="toast-files-changed-text"><strong>Files changed, probably the agent.</strong>' +
+      '<span class="toast-files-changed-info" tabindex="0" role="img" aria-label="' + FILES_CHANGED_HINT + '" data-hint="' + FILES_CHANGED_HINT + '">i</span></span>' +
+      '<div class="toast-actions">' +
+      '<button type="button" class="toast-btn toast-btn-ghost" data-dismiss-toast="files-changed">Not now</button>' +
+      '<button type="button" class="toast-btn toast-btn-filled" data-next-round title="Start a new review round with the changed files">Show changes</button>' +
+      '</div>');
+    const nextBtn = el.querySelector('[data-next-round]');
+    nextBtn.addEventListener('click', async function() {
+      nextBtn.disabled = true;
+      try {
+        const res = await fetch('/api/round-complete', { method: 'POST' });
+        if (!res.ok) throw new Error('Server returned ' + res.status);
+        dismissToast('files-changed');
+      } catch (err) {
+        console.error('Error starting the next round:', err);
+        showMiniToast('Failed to start the next round');
+        nextBtn.disabled = false;
       }
     });
   }
