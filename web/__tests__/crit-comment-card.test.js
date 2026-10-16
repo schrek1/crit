@@ -259,3 +259,24 @@ test('no agent status chip without agent_status', () => {
   );
   assert.equal(findByClass(out.card, 'agent-status').length, 0);
 });
+
+test('repaintAgentChips re-evaluates chips when the agent comes back', () => {
+  const now = Date.parse('2026-10-16T10:20:00.000Z');
+  let listening = false;
+  const deps = Object.assign(baseDeps(), { now: () => now, isAgentListening: () => listening });
+  const out = card.buildCommentCard(
+    {
+      id: 'r1', body: 'x', author: 'Ondra', created_at: '2026-10-16T10:00:00Z',
+      agent_status: { state: 'working', updated_at: '2026-10-16T10:00:00.000Z', deadline_at: '2026-10-16T10:15:00.000Z' },
+    },
+    '',
+    { deps: deps }
+  );
+  const chip = findByClass(out.card, 'agent-status')[0];
+  assert.equal(chip.textContent, 'Agent not responding');
+
+  listening = true;
+  card.repaintAgentChips();
+
+  assert.equal(chip.textContent, 'Working');
+});
