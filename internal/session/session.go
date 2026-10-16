@@ -162,6 +162,10 @@ type Comment struct {
 	GitLabDiscussionID string  `json:"gitlab_discussion_id,omitempty"`
 	GitLabResolved     *bool   `json:"gitlab_resolved,omitempty"`
 
+	// AgentStatus is set once the comment is sent to an agent (Send now,
+	// the auto-send option, or Finish) and updated by the agent itself.
+	AgentStatus *AgentStatus `json:"agent_status,omitempty"`
+
 	// LastPushedBodyHash is a short stable digest of Body at the time of
 	// the most recent successful push (POST or PATCH) to GitHub. Used by
 	// `crit push` to detect locally-edited comments that need a PATCH.
