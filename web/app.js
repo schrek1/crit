@@ -5645,6 +5645,7 @@
       agentLoopActive = !!info.agent_loop_active;
       agentListening = !!info.agent_listening;
       scheduleAgentLoopExpiry(info.agent_loop_until);
+      window.crit.commentCard.repaintAgentChips();
     } catch {
       // Keep the last known state; the next agent-status event retries.
     }
