@@ -2,7 +2,7 @@
 
 {{if .comments_unresolved_json}}{{.comments_unresolved_json}}
 
-{{end}}{{if eq .internal_session_mode "plan"}}Revise the plan to address each comment. To reply to comments, use `crit comment --plan {{.plan_slug}} --reply-to <id> --author <your-name> "<explanation>"`.{{else}}Address each comment. For each one, reply explaining what you did using `crit comment --reply-to <comment-id> --author <your-name> "<explanation>"`.{{end}} Put your explanations in these replies, not in chat. The reviewer reads them in Crit.{{if eq .plan_hook "codex"}}
+{{end}}{{if eq .internal_session_mode "plan"}}Revise the plan to address each comment. To reply to comments, use `crit comment --plan {{.plan_slug}} --reply-to <id> --author <your-name> "<explanation>"`.{{else}}Address each comment. Run `crit comment --status seen <id>` when you have read a comment and `crit comment --status working <id>` before you start on it. For each one, reply explaining what you did using `crit comment --reply-to <comment-id> --author <your-name> "<explanation>"`.{{end}} Put your explanations in these replies, not in chat. The reviewer reads them in Crit. Skip threads whose last reply is yours and where the reviewer has not written since.{{if eq .plan_hook "codex"}}
 
 When you're done, end your turn with the revised plan. That starts the next review round.{{else if .plan_hook}}
 
