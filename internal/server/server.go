@@ -518,6 +518,9 @@ func (s *Server) handleConfig(w http.ResponseWriter, r *http.Request) { //nolint
 		"agent_cmd_enabled":   s.agentCmd != "",
 		"agent_name":          agentName(s.agentCmd),
 		"agent_cmd":           s.agentCmd,
+		// Send now can reach an agent waiting on the review; /api/session
+		// reports whether one is there.
+		"agent_instant_replies": s.cfg.AgentInstantReplies,
 
 		// Auth status
 		"auth_logged_in":  selectedErr == nil && selected.Auth.Token != "",
@@ -716,15 +719,25 @@ func (s *Server) handleSession(w http.ResponseWriter, r *http.Request) {
 	}
 	type liveSessionResponse struct {
 		SessionInfo
-		ReviewType string `json:"review_type,omitempty"`
-		Origin     string `json:"origin,omitempty"`
-		ProxyPort  int    `json:"proxy_port,omitempty"`
+		ReviewType      string `json:"review_type,omitempty"`
+		Origin          string `json:"origin,omitempty"`
+		ProxyPort       int    `json:"proxy_port,omitempty"`
+		AgentListening  bool   `json:"agent_listening"`
+		AgentLoopActive bool   `json:"agent_loop_active"`
+		// AgentLoopUntil is when the loop stops counting as active unless the
+		// agent comes back; set only while no agent listens.
+		AgentLoopUntil string `json:"agent_loop_until,omitempty"`
 	}
 	resp := liveSessionResponse{SessionInfo: info}
 	if session != nil {
 		resp.ReviewType = session.ReviewType
 		resp.Origin = session.Origin
 		resp.ProxyPort = session.ProxyPort
+		resp.AgentListening = session.HasAgentListener()
+		resp.AgentLoopActive = session.AgentLoopActive(time.Now())
+		if until, ok := session.AgentLoopActiveUntil(); ok {
+			resp.AgentLoopUntil = until.UTC().Format(time.RFC3339Nano)
+		}
 	}
 	writeJSON(w, resp)
 }
@@ -2498,6 +2511,7 @@ func (s *Server) handleRoundComplete(w http.ResponseWriter, r *http.Request) {
 		})
 		return
 	}
+	sess.TakePendingFinish()
 	sess.SignalRoundComplete()
 	writeJSON(w, map[string]string{"status": "ok"})
 }
@@ -2599,6 +2613,11 @@ func (s *Server) handleFinish(w http.ResponseWriter, r *http.Request) {
 		eventDataMap["close_on_approve_after_ms"] = ms
 	}
 	eventData, _ := json.Marshal(eventDataMap)
+	if s.cfg.AgentInstantReplies {
+		// Kept until a review-cycle consumes it: an agent busy with a live
+		// delivery is not subscribed and would miss the event.
+		sess.SetPendingFinish(string(eventData))
+	}
 	sess.Notify(SSEEvent{
 		Type:    "finish",
 		Content: string(eventData),
@@ -2737,9 +2756,17 @@ func (s *Server) handleReviewCycle(w http.ResponseWriter, r *http.Request) {
 	// A plan hook starts the next round when the agent submits the plan
 	// again. While it waits, the finish prompt says that instead of
 	// `crit plan --name`.
-	if planHook := planHookParam(r, sess); planHook != "" {
+	planHook := planHookParam(r, sess)
+	live := planHook == "" && s.cfg.AgentInstantReplies
+	if planHook != "" {
 		sess.SetPlanHook(planHook)
 		defer sess.SetPlanHook("")
+	}
+	if live {
+		// Registered before Subscribe so a caller that sees the subscriber
+		// also sees the listener; a request queued in between is drained below.
+		sess.AgentListenerEnter()
+		defer sess.AgentListenerExit()
 	}
 
 	// Subscribe BEFORE round-complete to avoid missing the finish event
@@ -2748,44 +2775,44 @@ func (s *Server) handleReviewCycle(w http.ResponseWriter, r *http.Request) {
 	ch := sess.Subscribe()
 	defer sess.Unsubscribe(ch)
 
-	if !sess.IsAwaitingFirstReview() {
+	// After a live delivery the agent comes back mid-round: completing the
+	// round would clear the reviewer's open forms.
+	afterLiveDelivery := live && sess.TakeLastCycleLive()
+	roundCompleted := false
+	if !sess.IsAwaitingFirstReview() && !afterLiveDelivery {
+		// A kept Finish belongs to the round this call completes; the agent
+		// has handled that round, so the Finish is stale.
+		sess.TakePendingFinish()
 		// Agent finished changes — signal round-complete so browser refreshes
 		sess.SignalRoundComplete()
+		roundCompleted = true
+	} else if live {
+		if content, ok := sess.TakePendingFinish(); ok {
+			s.writeCycleFinish(w, sess, content)
+			return
+		}
+	}
+	// Completing the round clears the in-memory comments until the watcher
+	// carries them forward ("file-changed" session); queued requests wait
+	// for that instead of being dropped as unknown comments.
+	awaitingCarryForward := roundCompleted
+	if live && !awaitingCarryForward && s.writeLiveDelivery(w, sess) {
+		return
 	}
 
 	for {
 		select {
 		case event := <-ch:
 			if event.Type == "finish" {
-				sess.SetAwaitingFirstReview(false)
-				// Parse the structured finish event data
-				var finishData struct {
-					Prompt                string                  `json:"prompt"`
-					Approved              bool                    `json:"approved"`
-					Stats                 map[string]any          `json:"stats"`
-					Comments              []comment.ListedComment `json:"comments"`
-					PromptMeta            *prompt.Meta            `json:"prompt_meta"`
-					NextCommand           string                  `json:"next_command"`
-					CloseOnApproveAfterMs *int                    `json:"close_on_approve_after_ms"`
-				}
-				json.Unmarshal([]byte(event.Content), &finishData)
-				nextCommand := finishData.NextCommand
-				if nextCommand == "" {
-					nextCommand = session.NextRoundCommand(sess)
-				}
-				cycleResp := map[string]any{
-					"status":       "finished",
-					"prompt":       finishData.Prompt,
-					"approved":     finishData.Approved,
-					"comments":     finishData.Comments,
-					"stats":        finishData.Stats,
-					"next_command": nextCommand,
-					"prompt_meta":  finishData.PromptMeta,
-				}
-				if finishData.CloseOnApproveAfterMs != nil {
-					cycleResp["close_on_approve_after_ms"] = *finishData.CloseOnApproveAfterMs
-				}
-				writeJSON(w, cycleResp)
+				sess.TakePendingFinish()
+				s.writeCycleFinish(w, sess, event.Content)
+				return
+			}
+			if event.Type == "file-changed" && event.Content == "session" {
+				awaitingCarryForward = false
+			}
+			if (event.Type == "agent-request" || event.Type == "file-changed") &&
+				live && !awaitingCarryForward && s.writeLiveDelivery(w, sess) {
 				return
 			}
 			if event.Type == "server-shutdown" {
@@ -2835,6 +2862,7 @@ func (s *Server) handleWaitForEvent(w http.ResponseWriter, r *http.Request) {
 		select {
 		case event := <-ch:
 			if event.Type == "finish" {
+				sess.TakePendingFinish()
 				writeJSON(w, event)
 				return
 			}
@@ -3221,15 +3249,18 @@ func agentName(cmd string) string {
 	return filepath.Base(parts[0])
 }
 
-// handleAgentRequest dispatches a comment to the configured agent command.
+// handleAgentRequest sends a comment to the agent waiting on the review
+// (review-cycle) when one exists — it has the conversation's context — and
+// otherwise to the configured agent command.
 // POST /api/agent/request
 func (s *Server) handleAgentRequest(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
-	if s.agentCmd == "" {
-		http.Error(w, "agent_cmd not configured", http.StatusBadRequest)
+	toWaitingAgent := s.cfg.AgentInstantReplies && s.session.Load().AgentLoopActive(time.Now())
+	if !toWaitingAgent && s.agentCmd == "" {
+		http.Error(w, "no agent: none is waiting on the review and agent_cmd is not configured", http.StatusBadRequest)
 		return
 	}
 
@@ -3252,6 +3283,19 @@ func (s *Server) handleAgentRequest(w http.ResponseWriter, r *http.Request) {
 		}
 		filePath = ""
 		sess.SetReviewCommentLive(comment.ID)
+	}
+
+	if toWaitingAgent {
+		sess.EnqueueAgentRequest(session.AgentRequest{CommentID: comment.ID, FilePath: filePath})
+		writeJSONStatus(w, http.StatusAccepted, map[string]any{
+			"status":     "queued",
+			"comment_id": body.CommentID,
+			"file_path":  filePath,
+		})
+		return
+	}
+	if s.cfg.AgentInstantReplies {
+		sess.SetCommentAgentStatus(filePath, comment.ID, session.AgentStateDelivered, 0)
 	}
 
 	prompt := buildAgentPrompt(comment, filePath)

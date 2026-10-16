@@ -22,7 +22,8 @@ func (e *daemonInitializationError) Error() string {
 // RunReviewClient connects to a running daemon, blocks until the user finishes
 // reviewing, prints feedback to stdout, and returns whether the review was approved.
 // When quiet is true, the optional session summary on stderr is omitted; the
-// approved line and finish prompt are always printed (agent contract).
+// approved line, the event line (live deliveries only) and the prompt are
+// always printed (agent contract).
 func RunReviewClient(entry SessionEntry, sessionKey string, quiet bool) (approved bool) {
 	client := &http.Client{Timeout: 24 * time.Hour}
 
@@ -50,6 +51,7 @@ func RunReviewClient(entry SessionEntry, sessionKey string, quiet bool) (approve
 
 	var result struct {
 		Approved    bool   `json:"approved"`
+		Event       string `json:"event"`
 		Prompt      string `json:"prompt"`
 		NextCommand string `json:"next_command"`
 		Stats       *struct {
@@ -64,6 +66,11 @@ func RunReviewClient(entry SessionEntry, sessionKey string, quiet bool) (approve
 	}
 
 	fmt.Fprintf(os.Stderr, "approved: %v\n", result.Approved)
+	// Agents that know only the approved line still handle a live delivery:
+	// it is approved: false, so they reply and run crit again.
+	if result.Event != "" {
+		fmt.Fprintf(os.Stderr, "event: %s\n", result.Event)
+	}
 	if result.Prompt != "" {
 		fmt.Fprint(os.Stdout, result.Prompt)
 	}

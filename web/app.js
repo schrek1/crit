@@ -317,13 +317,16 @@
 
   // Bind Ctrl/Cmd+Enter (submit) and Escape (cancel) to a text input/textarea.
   // opts.stopPropagation defaults to true (matches comment-form keydown behavior).
+  // opts.onShiftSubmit, when set, takes Ctrl/Cmd+Shift+Enter instead of onSubmit.
   function bindSubmitCancelKeys(el, onSubmit, onCancel, opts) {
     const stop = !opts || opts.stopPropagation !== false;
+    const onShiftSubmit = opts && opts.onShiftSubmit;
     el.addEventListener('keydown', function(e) {
       if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) {
         e.preventDefault();
         if (stop) e.stopPropagation();
-        onSubmit(e);
+        if (e.shiftKey && onShiftSubmit) onShiftSubmit(e);
+        else onSubmit(e);
       } else if (e.key === 'Escape') {
         e.preventDefault();
         if (stop) e.stopPropagation();
@@ -464,6 +467,14 @@
   let prData = null;     // PR metadata from /api/config (set once on load)
   let agentEnabled = false;
   let agentName = 'agent';
+  // The global agent_instant_replies switch: off keeps Send now on agent_cmd
+  // and hides agent statuses.
+  let instantReplies = false;
+  // An agent waits on the review through `crit` (or just left to work on a
+  // delivery); Send now reaches it without agent_cmd.
+  let agentLoopActive = false;
+  // The agent waits on review-cycle right now, so it is alive.
+  let agentListening = false;
   const pendingAgentRequests = new Set();
 
   // Track active reply form state so it survives DOM re-renders (commentId → { text })
@@ -972,6 +983,9 @@
     sessionRes = await hydrateStoryIfMissing(sessionRes);
     sessionRes = await hydrateFullSessionForStoryIfNeeded(sessionRes);
     session = sessionRes;
+    agentLoopActive = !!sessionRes.agent_loop_active;
+    agentListening = !!sessionRes.agent_listening;
+    scheduleAgentLoopExpiry(sessionRes.agent_loop_until);
     reviewComments = sessionRes.review_comments || [];
 
     // Fire-and-forget: verify file list endpoint is available for @-mention autocomplete
@@ -989,6 +1003,7 @@
     configAuthor = configRes.author || '';
     agentEnabled = configRes.agent_cmd_enabled || false;
     agentName = configRes.agent_name || 'agent';
+    instantReplies = configRes.agent_instant_replies === true;
 
     // Build the shared Share controller (window.crit.share). It owns all share
     // state internally; we pass the config from /api/config plus app.js-specific
@@ -4847,7 +4862,11 @@
       ? function() { if (confirmDiscardReviewCommentForm()) opts.onCancel(); }
       : function() { if (confirmDiscardCommentForm(formObj)) cancelComment(formObj); };
 
-    bindSubmitCancelKeys(textarea, doSubmit, doCancelFromEsc);
+    // Ctrl/Cmd+Shift+Enter is Send now while the button is shown, else a plain Comment.
+    let sendNow = null;
+    bindSubmitCancelKeys(textarea, doSubmit, doCancelFromEsc, {
+      onShiftSubmit: function() { if (sendNow) sendNow(); else doSubmit(); },
+    });
 
     if (!opts.onSubmit) {
       textarea.addEventListener('input', function() { debouncedSaveDraft(textarea.value, formObj); });
@@ -4870,11 +4889,11 @@
     actions.appendChild(submitBtn);
 
     // Callers put editingId on formObj, not opts.
-    if (agentEnabled && !opts.editingId && !formObj.editingId) {
+    if (agentAvailable() && !opts.editingId && !formObj.editingId) {
       const sendBtn = document.createElement('button');
       sendBtn.className = 'btn btn-sm btn-agent';
       sendBtn.innerHTML = '<svg viewBox="0 0 24 24" width="12" height="12" fill="currentColor" style="vertical-align: -1px"><polygon points="13 2 3 14 12 14 11 22 21 10 12 10"/></svg> Send now';
-      sendBtn.title = 'Submit comment and send to agent';
+      sendBtn.title = 'Submit comment and send to agent (Ctrl+Shift+Enter)';
       sendBtn.addEventListener('click', async function() {
         sendBtn.disabled = true;
         submitBtn.disabled = true;
@@ -4909,6 +4928,7 @@
         }
       });
       actions.appendChild(sendBtn);
+      sendNow = function() { if (!sendBtn.disabled) sendBtn.click(); };
     }
 
     form.appendChild(header);
@@ -5211,19 +5231,96 @@
   }
 
   // ===== Agent Button =====
+  // appendThreadSendNow puts Send now on the last message of a thread that is
+  // not live yet (e.g. one waiting for Finish Review); the agent gets the
+  // whole thread and the thread turns live.
+  function appendThreadSendNow(card, comment, filePath, rerender) {
+    if (!agentAvailable() || comment.live || comment.resolved || pendingAgentRequests.has(comment.id)) return;
+    const replyBodies = card.querySelectorAll('.comment-reply .reply-body');
+    const target = replyBodies.length ? replyBodies[replyBodies.length - 1] : card.querySelector('.comment-body');
+    if (!target) return;
+    const btn = document.createElement('button');
+    btn.type = 'button';
+    btn.className = 'btn btn-sm btn-agent thread-send-now';
+    btn.setAttribute('aria-label', 'Send to agent now');
+    btn.dataset.hint = 'Send now: the agent gets this thread right away';
+    btn.innerHTML = '<svg viewBox="0 0 24 24" width="12" height="12" fill="currentColor"><polygon points="13 2 3 14 12 14 11 22 21 10 12 10"/></svg>';
+    btn.addEventListener('click', async function(e) {
+      e.stopPropagation();
+      if (btn.disabled) return;
+      btn.disabled = true;
+      pendingAgentRequests.add(comment.id);
+      rerender();
+      try {
+        const res = await fetch('/api/agent/request', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ comment_id: comment.id, file_path: filePath }),
+        });
+        if (!res.ok) throw new Error('Server returned ' + res.status);
+        showMiniToast('Sent to agent');
+      } catch (err) {
+        console.error('Error sending to agent:', err);
+        showMiniToast('Failed to send to agent');
+        pendingAgentRequests.delete(comment.id);
+        rerender();
+      }
+    });
+    target.prepend(btn);
+  }
+
+  function agentAvailable() {
+    return agentEnabled || waitingAgentReachable();
+  }
+
+  function waitingAgentReachable() {
+    return instantReplies && agentLoopActive;
+  }
+
+  // The waiting agent signs its replies with its own name, not agent_cmd's.
+  function pendingAgentName() {
+    return waitingAgentReachable() ? 'agent' : agentName;
+  }
+
   function isLiveThread(comment) {
-    if (!agentEnabled) return false;
+    if (!agentAvailable()) return false;
     return !!comment.live;
   }
 
+  // A reply by anyone but the comment's author answers a pending request:
+  // the waiting agent's name is not known in advance.
   function checkAgentReplies(comments) {
     for (const c of comments) {
       if (pendingAgentRequests.has(c.id) && c.replies && c.replies.length > 0) {
         const lastReply = c.replies[c.replies.length - 1];
-        if (lastReply.author === agentName) {
+        if (lastReply.author !== c.author) {
           pendingAgentRequests.delete(c.id);
         }
       }
+    }
+  }
+
+  // The server sends no event when the grace after the agent left runs out,
+  // so refresh then, or Send now stays offered for an agent that is gone.
+  let agentLoopExpiryTimer = null;
+  function scheduleAgentLoopExpiry(until) {
+    if (agentLoopExpiryTimer) clearTimeout(agentLoopExpiryTimer);
+    agentLoopExpiryTimer = null;
+    const ms = until ? Date.parse(until) - Date.now() : NaN;
+    if (ms > 0) agentLoopExpiryTimer = setTimeout(refreshAgentLoopState, ms + 1000);
+  }
+
+  async function refreshAgentLoopState() {
+    try {
+      const res = await fetch('/api/session');
+      if (!res.ok) return;
+      const info = await res.json();
+      agentLoopActive = !!info.agent_loop_active;
+      agentListening = !!info.agent_listening;
+      scheduleAgentLoopExpiry(info.agent_loop_until);
+      window.crit.commentCard.repaintAgentChips();
+    } catch {
+      // Keep the last known state; the next agent-status event retries.
     }
   }
 
@@ -5264,7 +5361,9 @@
       formatTime: formatTime,
       authorColorIndex: authorColorIndex,
       getReviewRound: function () { return session && session.review_round; },
-      getAgentName: function () { return agentName; },
+      getAgentName: pendingAgentName,
+      isAgentListening: function () { return agentListening; },
+      showAgentStatus: function () { return instantReplies; },
       buildCommentEnv: buildCommentEnv,
       renderReplyList: renderReplyList,
       createReplyInput: createReplyInput,
@@ -5313,6 +5412,7 @@
     parts.actions.appendChild(resolveBtn);
     parts.actions.appendChild(editBtn);
     parts.actions.appendChild(deleteBtn);
+    appendThreadSendNow(parts.card, comment, filePath, function() { renderFileByPath(filePath); });
 
     return parts.wrapper;
   }
@@ -5876,6 +5976,7 @@
     });
     parts.actions.appendChild(editBtn);
     parts.actions.appendChild(deleteBtn);
+    appendThreadSendNow(parts.card, comment, '', renderReviewConversation);
 
     return parts.wrapper;
   }
@@ -6154,6 +6255,12 @@
     });
   }
 
+  function findCommentForReply(commentId, filePath) {
+    if (!filePath) return reviewComments.find(function(c) { return c.id === commentId; }) || null;
+    const file = getFileByPath(filePath);
+    return (file && file.comments && file.comments.find(function(c) { return c.id === commentId; })) || null;
+  }
+
   function createReplyInput(commentId, filePath) {
     const form = document.createElement('div');
     form.className = 'reply-form';
@@ -6164,14 +6271,14 @@
     const input = document.createElement('input');
     input.type = 'text';
     input.className = 'reply-input';
-    input.placeholder = isPending ? 'Waiting for @' + agentName + '\u2026' : 'Write a reply\u2026';
+    input.placeholder = isPending ? 'Waiting for @' + pendingAgentName() + '\u2026' : 'Write a reply\u2026';
     if (isPending) input.disabled = true;
     form.appendChild(input);
 
     // Expanded state elements (hidden initially)
     const textarea = document.createElement('textarea');
     textarea.className = 'reply-textarea';
-    textarea.placeholder = isPending ? 'Waiting for @' + agentName + '\u2026' : 'Write a reply\u2026';
+    textarea.placeholder = isPending ? 'Waiting for @' + pendingAgentName() + '\u2026' : 'Write a reply\u2026';
     textarea.rows = 3;
     if (isPending) textarea.disabled = true;
 
@@ -6190,6 +6297,18 @@
 
     buttons.appendChild(cancelBtn);
     buttons.appendChild(submitBtn);
+
+    // A thread that is not live yet can still go to the agent: the reply is
+    // sent with it and the thread turns live.
+    let sendBtn = null;
+    const replyComment = findCommentForReply(commentId, filePath);
+    if (agentAvailable() && !isPending && replyComment && !isLiveThread(replyComment)) {
+      sendBtn = document.createElement('button');
+      sendBtn.className = 'btn btn-sm btn-agent';
+      sendBtn.innerHTML = '<svg viewBox="0 0 24 24" width="12" height="12" fill="currentColor" style="vertical-align: -1px"><polygon points="13 2 3 14 12 14 11 22 21 10 12 10"/></svg> Send now';
+      sendBtn.title = 'Reply and send the thread to the agent (Ctrl+Shift+Enter)';
+      buttons.appendChild(sendBtn);
+    }
     // Always mounted; CSS hides the whole form when the card is collapsed.
     form.appendChild(buttons);
 
@@ -6253,10 +6372,11 @@
       }, 150);
     });
 
-    submitBtn.addEventListener('click', async function() {
+    async function submitReply(sendToAgent) {
       const body = activeField().value.trim();
       if (!body) { activeField().focus(); return; }
       submitBtn.disabled = true;
+      if (sendBtn) sendBtn.disabled = true;
       try {
         const payload = { body: body };
         if (configAuthor) payload.author = configAuthor;
@@ -6272,25 +6392,22 @@
         userActedThisRound = true;
 
         // Keep a live thread talking to the agent.
-        let comment = null;
-        if (filePath) {
-          const file = getFileByPath(filePath);
-          if (file && file.comments) {
-            comment = file.comments.find(function(c) { return c.id === commentId; });
-          }
-        } else {
-          comment = reviewComments.find(function(c) { return c.id === commentId; });
-        }
-        if (comment && (isLiveThread(comment) || pendingAgentRequests.has(commentId))) {
+        const comment = findCommentForReply(commentId, filePath);
+        if (comment && (sendToAgent || isLiveThread(comment) || pendingAgentRequests.has(commentId))) {
           pendingAgentRequests.add(commentId);
           fetch('/api/agent/request', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ comment_id: commentId, file_path: filePath }),
+          }).then(function(agentRes) {
+            // A 400 (no agent left) must free the reply box like a network error.
+            if (!agentRes.ok) throw new Error('Server returned ' + agentRes.status);
+            if (sendToAgent) showMiniToast('Sent to agent');
           }).catch(function(err) {
             console.error('Error sending reply to agent:', err);
             pendingAgentRequests.delete(commentId);
             showMiniToast('Failed to send to agent');
+            refreshAfterReplyChange(filePath);
           });
         }
 
@@ -6301,14 +6418,19 @@
         console.error('Failed to add reply:', err);
         showMiniToast('Failed to save reply');
         submitBtn.disabled = false;
+        if (sendBtn) sendBtn.disabled = false;
       }
-    });
+    }
+
+    submitBtn.addEventListener('click', function() { submitReply(false); });
+    if (sendBtn) sendBtn.addEventListener('click', function() { submitReply(true); });
 
     textarea.addEventListener('keydown', function(e) {
       if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) {
         e.preventDefault();
         e.stopPropagation();
-        submitBtn.click();
+        if (e.shiftKey && sendBtn) sendBtn.click();
+        else submitBtn.click();
       }
       if (e.key === 'Escape') {
         e.preventDefault();
@@ -7050,6 +7172,7 @@
     const conn = window.crit.sse.createSSE('/api/events', {
       'file-changed': async function() {
       try {
+        dismissToast('files-changed');
         // Reset action tracking for new round
         userActedThisRound = false;
 
@@ -7154,8 +7277,13 @@
           if (waitingNotApproved) {
             document.getElementById('waitingMessage').textContent = 'Waiting for your agent to finish...';
           }
+        } else if (instantReplies && uiState === 'reviewing') {
+          showFilesChangedToast();
         }
       } catch {}
+      },
+      'agent-status': function() {
+        if (instantReplies) refreshAgentLoopState();
       },
       'comments-changed': async function() {
       try {
@@ -7356,6 +7484,38 @@
       setTimeout(function() { dismissToast(id); }, 4000);
     }
     return el;
+  }
+
+  // An agent answering a live comment can edit the files mid-round; the page
+  // shows them only in the next round, which the reviewer may start now.
+  const FILES_CHANGED_HINT = 'You still see the version from the start of this round, so nothing moves while you read. ' +
+    'Show changes (Shift+R) starts a new round with the changed files; your comments move with the text and nothing is sent to the agent.';
+
+  function showFilesChangedToast() {
+    // One bar however many edits arrive; showToast's dismiss-and-recreate
+    // would stack a new bar on the one still fading out.
+    const shown = document.getElementById('toast-files-changed');
+    if (shown && !shown.classList.contains('toast-out')) return;
+    const el = showToast('files-changed', 'files-changed',
+      '<span class="toast-files-changed-text"><strong>Files changed, probably the agent.</strong>' +
+      '<span class="toast-files-changed-info" tabindex="0" role="img" aria-label="' + FILES_CHANGED_HINT + '" data-hint="' + FILES_CHANGED_HINT + '">i</span></span>' +
+      '<div class="toast-actions">' +
+      '<button type="button" class="toast-btn toast-btn-ghost" data-dismiss-toast="files-changed">Not now</button>' +
+      '<button type="button" class="toast-btn toast-btn-filled" data-next-round title="Start a new review round with the changed files (Shift+R)">Show changes</button>' +
+      '</div>');
+    const nextBtn = el.querySelector('[data-next-round]');
+    nextBtn.addEventListener('click', async function() {
+      nextBtn.disabled = true;
+      try {
+        const res = await fetch('/api/round-complete', { method: 'POST' });
+        if (!res.ok) throw new Error('Server returned ' + res.status);
+        dismissToast('files-changed');
+      } catch (err) {
+        console.error('Error starting the next round:', err);
+        showMiniToast('Failed to start the next round');
+        nextBtn.disabled = false;
+      }
+    });
   }
 
   function dismissToast(id) {
@@ -8990,6 +9150,13 @@
         e.preventDefault();
         if (uiState !== 'reviewing') return;
         document.getElementById('finishBtn').click();
+        break;
+      }
+      case 'show_changes': {
+        const showChangesBtn = document.querySelector('#toast-files-changed:not(.toast-out) [data-next-round]');
+        if (!showChangesBtn) return;
+        e.preventDefault();
+        showChangesBtn.click();
         break;
       }
       case 'general_comment': {

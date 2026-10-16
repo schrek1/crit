@@ -40,6 +40,48 @@
   function alwaysFalse() { return false; }
   function alwaysUndef() { return undefined; }
 
+  function agentStatusHelpers() {
+    if (typeof window !== 'undefined' && window.crit && window.crit.commentCardHelpers) {
+      return window.crit.commentCardHelpers;
+    }
+    return typeof require === 'function' ? require('./crit-comment-card-helpers.js') : null;
+  }
+
+  // Repaint hooks of rendered chips, so a change in the agent's state (it came
+  // back to the review) updates them without re-rendering the cards.
+  var chipPainters = new Set();
+
+  function repaintAgentChips() {
+    chipPainters.forEach(function (paint) { paint(); });
+  }
+
+  // buildAgentStatusChip shows where a comment sent to the agent is. A chip
+  // still waiting on the agent flips to "not responding" at its deadline
+  // without a re-render.
+  function buildAgentStatusChip(comment, now, isAgentListening) {
+    var helpers = agentStatusHelpers();
+    if (!helpers || !comment.agent_status) return null;
+    var chip = document.createElement('span');
+    function paint() {
+      if (chip.isConnected === false && chip.dataset.painted) {
+        chipPainters.delete(paint);
+        return;
+      }
+      chip.dataset.painted = '1';
+      var state = helpers.effectiveAgentState(comment, now(), { agentListening: isAgentListening() });
+      chip.className = 'agent-status agent-status-' + state;
+      chip.textContent = helpers.agentStateLabel(state);
+    }
+    paint();
+    chipPainters.add(paint);
+    var wait = helpers.agentStatusDeadlineMs(comment) - now();
+    if (wait > 0 && typeof setTimeout === 'function') {
+      var timer = setTimeout(paint, wait + 50);
+      if (timer && typeof timer.unref === 'function') timer.unref();
+    }
+    return chip;
+  }
+
   function buildCommentCard(comment, filePath, opts) {
     opts = opts || {};
     var deps = opts.deps || {};
@@ -124,6 +166,12 @@
     time.className = 'comment-time';
     time.textContent = formatTime(comment.created_at);
     headerLeft.appendChild(time);
+
+    var showAgentStatus = deps.showAgentStatus || alwaysFalse;
+    var agentChip = showAgentStatus()
+      ? buildAgentStatusChip(comment, deps.now || Date.now, deps.isAgentListening || alwaysFalse)
+      : null;
+    if (agentChip) headerLeft.appendChild(agentChip);
 
     if (liveOrPending) {
       var badge = document.createElement('span');
@@ -271,5 +319,6 @@
 
   return {
     buildCommentCard: buildCommentCard,
+    repaintAgentChips: repaintAgentChips,
   };
 });

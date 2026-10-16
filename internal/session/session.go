@@ -162,6 +162,10 @@ type Comment struct {
 	GitLabDiscussionID string  `json:"gitlab_discussion_id,omitempty"`
 	GitLabResolved     *bool   `json:"gitlab_resolved,omitempty"`
 
+	// AgentStatus is set once the comment is sent to an agent (Send now,
+	// the auto-send option, or Finish) and updated by the agent itself.
+	AgentStatus *AgentStatus `json:"agent_status,omitempty"`
+
 	// LastPushedBodyHash is a short stable digest of Body at the time of
 	// the most recent successful push (POST or PATCH) to GitHub. Used by
 	// `crit push` to detect locally-edited comments that need a PATCH.
@@ -477,6 +481,9 @@ type Session struct {
 	// yet written to disk. Keyed by file path -> set of comment IDs. buildCritJSON's
 	// applyDeletedCommentIDs drops them after merging with disk.
 	deletedCommentIDs map[string]map[string]struct{}
+	// deletedReplyIDs lists replies the reviewer deleted, so a daemon write
+	// does not take them back from a review file that still has them.
+	deletedReplyIDs map[string]struct{}
 
 	// pendingRemoteDeletes is the provider-neutral delete queue. A concurrent
 	// push may drain it on disk, so lastLoadedPendingDeletes prevents daemon
@@ -513,6 +520,8 @@ type Session struct {
 	waitingForAgent     bool      // true between finish (with unresolved comments) and round-complete
 	planHook            string    // plan_mode | codex while a plan hook waits on review-cycle
 	browserClients      int32     // number of connected SSE browser clients (atomic)
+
+	agent agentChannel
 
 	// Focus is the discriminator that selects what the session is showing.
 	// Defaults to FocusWorkingTree (today's behavior). Range-mode sessions
@@ -1597,6 +1606,7 @@ func (s *Session) DeleteReviewCommentReply(commentID, replyID string) bool {
 				if r.ID == replyID {
 					s.reviewComments[i].Replies = append(s.reviewComments[i].Replies[:j], s.reviewComments[i].Replies[j+1:]...)
 					s.reviewComments[i].UpdatedAt = time.Now().UTC().Format(time.RFC3339)
+					s.markReplyDeletedLocked(replyID)
 					s.scheduleWrite()
 					return true
 				}
@@ -1872,6 +1882,7 @@ func (s *Session) DeleteReply(filePath, commentID, replyID string) bool {
 			}
 			f.Comments[i].Replies = append(f.Comments[i].Replies[:j], f.Comments[i].Replies[j+1:]...)
 			f.Comments[i].UpdatedAt = time.Now().UTC().Format(time.RFC3339)
+			s.markReplyDeletedLocked(replyID)
 			s.scheduleWrite()
 			return true
 		}
@@ -2384,6 +2395,7 @@ func (s *Session) ClearAllComments() {
 	s.lastRoundEdits = 0
 	critPath := s.critJSONPath()
 	s.mu.Unlock()
+	s.ResetAgentChannel()
 	// Full-folder cleanup; idempotent on missing folder.
 	if err := os.RemoveAll(critPath); err != nil && !os.IsNotExist(err) {
 		fmt.Fprintf(os.Stderr, "Warning: removing review folder: %v\n", err)
