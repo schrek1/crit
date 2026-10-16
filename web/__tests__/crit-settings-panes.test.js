@@ -600,3 +600,39 @@ test('renderShortcutsPane: defaults to code-review when no opts passed', () => {
   assert.match(pane.innerHTML, /<kbd>j<\/kbd>/);
   assert.doesNotMatch(pane.innerHTML, /Toggle pin mode/);
 });
+
+function autoSendHooks(available) {
+  return {
+    applyTheme: () => {},
+    getHideResolved: () => false,
+    setHideResolved: () => {},
+    isAgentAvailable: () => available,
+  };
+}
+
+test('renderSettingsTab: auto-send toggle reflects cookie', () => {
+  const { panes } = loadPanes('crit-settings=' + encodeURIComponent(JSON.stringify({ autoSendToAgent: true })));
+  const pane = makePane();
+  panes.renderSettingsTab(pane, { mode: 'git', cfg: { no_integration_check: true }, hooks: autoSendHooks(true) });
+  assert.match(pane.innerHTML, /Send every comment to the agent/);
+  assert.match(pane.innerHTML, /id="autoSendToAgentToggle"[^>]*checked/);
+});
+
+test('renderSettingsTab: auto-send toggle off by default', () => {
+  const pane = makePane();
+  loadShared().renderSettingsTab(pane, { mode: 'git', cfg: { no_integration_check: true }, hooks: autoSendHooks(true) });
+  assert.match(pane.innerHTML, /id="autoSendToAgentToggle"/);
+  assert.doesNotMatch(pane.innerHTML, /id="autoSendToAgentToggle"[^>]*checked/);
+});
+
+test('renderSettingsTab: auto-send toggle disabled without agent', () => {
+  const pane = makePane();
+  loadShared().renderSettingsTab(pane, { mode: 'git', cfg: { no_integration_check: true }, hooks: autoSendHooks(false) });
+  assert.match(pane.innerHTML, /id="autoSendToAgentToggle"[^>]*disabled/);
+});
+
+test('renderSettingsTab: no auto-send toggle when the caller has no agent hook', () => {
+  const pane = makePane();
+  loadShared().renderSettingsTab(pane, { mode: 'live', cfg: { no_integration_check: true }, hooks: { applyTheme: () => {}, getHideResolved: () => false, setHideResolved: () => {} } });
+  assert.doesNotMatch(pane.innerHTML, /autoSendToAgentToggle/);
+});
