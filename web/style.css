@@ -3057,6 +3057,12 @@ textarea.drag-active {
   outline: 2px solid var(--crit-brand);
   outline-offset: 2px;
 }
+.comments-panel-switch:has(input:disabled) {
+  cursor: not-allowed;
+}
+.comments-panel-switch input:disabled ~ .comments-panel-switch-track {
+  opacity: 0.4;
+}
 
 /* Hide-resolved: body-class-driven CSS rule (replaces imperative DOM walk). */
 body.hide-resolved .comment-block:not(.panel-comment-block):has(.resolved-card) {
