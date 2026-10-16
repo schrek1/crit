@@ -186,3 +186,13 @@ func TestMergeReviewCommentFromDisk_AdoptsNewerAgentStatus(t *testing.T) {
 		t.Errorf("changed=%v AgentStatus=%+v, want adopted working status", changed, got.AgentStatus)
 	}
 }
+
+func TestCarryForwardComment_PreservesAgentStatus(t *testing.T) {
+	st := &AgentStatus{State: AgentStateWorking, UpdatedAt: "2026-10-16T10:00:00Z"}
+
+	out := carryForwardComment(Comment{ID: "c1", Body: "carry me", AgentStatus: st}, "2026-10-16T11:00:00Z")
+
+	if out.AgentStatus != st {
+		t.Errorf("AgentStatus = %+v, want it carried to the next round", out.AgentStatus)
+	}
+}
