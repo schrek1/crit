@@ -464,6 +464,9 @@
   let prData = null;     // PR metadata from /api/config (set once on load)
   let agentEnabled = false;
   let agentName = 'agent';
+  // The global agent_instant_replies switch: off keeps Send now on agent_cmd
+  // and hides agent statuses.
+  let instantReplies = false;
   // An agent waits on the review through `crit` (or just left to work on a
   // delivery); Send now reaches it without agent_cmd.
   let agentLoopActive = false;
@@ -996,6 +999,7 @@
     configAuthor = configRes.author || '';
     agentEnabled = configRes.agent_cmd_enabled || false;
     agentName = configRes.agent_name || 'agent';
+    instantReplies = configRes.agent_instant_replies === true;
 
     // Build the shared Share controller (window.crit.share). It owns all share
     // state internally; we pass the config from /api/config plus app.js-specific
@@ -5132,12 +5136,16 @@
 
   // ===== Agent Button =====
   function agentAvailable() {
-    return agentEnabled || agentLoopActive;
+    return agentEnabled || waitingAgentReachable();
+  }
+
+  function waitingAgentReachable() {
+    return instantReplies && agentLoopActive;
   }
 
   // The waiting agent signs its replies with its own name, not agent_cmd's.
   function pendingAgentName() {
-    return agentLoopActive ? 'agent' : agentName;
+    return waitingAgentReachable() ? 'agent' : agentName;
   }
 
   function isLiveThread(comment) {
@@ -5221,6 +5229,7 @@
       getReviewRound: function () { return session && session.review_round; },
       getAgentName: pendingAgentName,
       isAgentListening: function () { return agentListening; },
+      showAgentStatus: function () { return instantReplies; },
       buildCommentEnv: buildCommentEnv,
       renderReplyList: renderReplyList,
       createReplyInput: createReplyInput,
@@ -7118,7 +7127,7 @@
       } catch {}
       },
       'agent-status': function() {
-        refreshAgentLoopState();
+        if (instantReplies) refreshAgentLoopState();
       },
       'comments-changed': async function() {
       try {
