@@ -651,9 +651,8 @@ func (s *Session) SyncCommentsFromDisk() bool {
 // mergeRepliesWrittenSinceLastWrite takes into memory the replies that
 // `crit comment --reply-to` wrote to the review file since the daemon's last
 // write. Every write calls it first: the watcher skips its merge while a write
-// is pending, and the write would otherwise overwrite those replies. It takes
-// only replies created since that write, so one the reviewer deleted in the
-// meantime does not come back, and it adds or removes no comments.
+// is pending, and the write would otherwise overwrite those replies. Replies
+// the reviewer deleted stay out, and it adds or removes no comments.
 func (s *Session) mergeRepliesWrittenSinceLastWrite(critPath string) {
 	path := ReviewPathsFor(critPath).Review
 	info, err := os.Stat(path)
@@ -674,19 +673,17 @@ func (s *Session) mergeRepliesWrittenSinceLastWrite(critPath string) {
 	if err := json.Unmarshal(data, &cj); err != nil {
 		return
 	}
-	// Reply timestamps have whole seconds.
-	since := lastWrite.Truncate(time.Second)
 	changed := false
 	s.mu.Lock()
 	for _, f := range s.Files {
 		if diskFile, ok := cj.Files[f.Path]; ok {
 			for _, dc := range diskFile.Comments {
-				changed = addRepliesCreatedSince(f.Comments, dc, since) || changed
+				changed = s.addNewRepliesLocked(f.Comments, dc) || changed
 			}
 		}
 	}
 	for _, dc := range cj.ReviewComments {
-		changed = addRepliesCreatedSince(s.reviewComments, dc, since) || changed
+		changed = s.addNewRepliesLocked(s.reviewComments, dc) || changed
 	}
 	s.mu.Unlock()
 	if changed {
@@ -694,7 +691,9 @@ func (s *Session) mergeRepliesWrittenSinceLastWrite(critPath string) {
 	}
 }
 
-func addRepliesCreatedSince(comments []Comment, dc Comment, since time.Time) bool {
+// addNewRepliesLocked appends disk replies of dc that memory lacks and the
+// reviewer did not delete. Caller must hold s.mu.
+func (s *Session) addNewRepliesLocked(comments []Comment, dc Comment) bool {
 	for i := range comments {
 		if comments[i].ID != dc.ID {
 			continue
@@ -705,7 +704,9 @@ func addRepliesCreatedSince(comments []Comment, dc Comment, since time.Time) boo
 		}
 		changed := false
 		for _, r := range dc.Replies {
-			if _, ok := known[r.ID]; ok || !createdSince(r.CreatedAt, since) {
+			_, inMemory := known[r.ID]
+			_, deleted := s.deletedReplyIDs[r.ID]
+			if inMemory || deleted {
 				continue
 			}
 			comments[i].Replies = append(comments[i].Replies, r)
@@ -716,14 +717,13 @@ func addRepliesCreatedSince(comments []Comment, dc Comment, since time.Time) boo
 	return false
 }
 
-// createdSince reports whether a reply was created at or after since; a zero
-// since (nothing written yet) or an unparsable stamp lets the reply in.
-func createdSince(createdAt string, since time.Time) bool {
-	created, err := time.Parse(time.RFC3339, createdAt)
-	if err != nil || since.IsZero() {
-		return true
+// markReplyDeletedLocked records a reply the reviewer deleted. Caller must
+// hold s.mu.
+func (s *Session) markReplyDeletedLocked(replyID string) {
+	if s.deletedReplyIDs == nil {
+		s.deletedReplyIDs = make(map[string]struct{})
 	}
-	return !created.Before(since)
+	s.deletedReplyIDs[replyID] = struct{}{}
 }
 
 func (s *Session) mergeExternalCritJSON() bool {
