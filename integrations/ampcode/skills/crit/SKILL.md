@@ -64,7 +64,7 @@ If a crit server is already running from earlier in this conversation, `crit` au
 When `crit` completes, read **stdout** and follow its instructions. Check **stderr** for `approved: true` or `approved: false`.
 
 <important if="stderr also has an `event: agent_request` line">
-The reviewer sent comments mid-round (Send now, or the option to send every comment); the review is not finished. Run `crit comment --status seen <id>` once you have read them and `crit comment --status working <id>` before you start on one, reply to those comments only, then run the next-round command from stdout right away. Do not stop the loop and do not treat it as approval.
+The reviewer sent comments mid-round (Send now, or a reply in a live thread); the review is not finished. Run `crit comment --status seen <id>` once you have read them and `crit comment --status working <id>` before you start on one, reply to those comments only, then run the next-round command from stdout right away. Do not stop the loop and do not treat it as approval.
 </important>
 
 When a comment has `quote`, `anchor`, or `drifted`:

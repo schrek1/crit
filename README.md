@@ -321,7 +321,6 @@ When your agent runs the review loop (`crit` waiting for Finish Review), "Send n
 - The agent's `crit` returns at once with the comment: `approved: false` plus an `event: agent_request` line on stderr, and the [`on_agent_request`](docs/agent-prompts.md) prompt on stdout. It replies and runs `crit` again; the round does not end, so your open drafts stay.
 - If the agent is busy between two `crit` calls, the comment waits in a queue and its next `crit` returns at once. A Finish Review clicked meanwhile is kept the same way.
 - Replies in the thread go to the agent too (live thread). The waiting agent wins over `agent_cmd` when both are available.
-- Settings → **Send every comment to the agent** sends each new comment and reply like "Send now" (works with `agent_cmd` too; off by default, stored in a browser cookie).
 
 #### Agent status
 

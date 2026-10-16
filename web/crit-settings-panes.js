@@ -644,20 +644,6 @@
       html += '</div>';
     }
 
-    // Auto-send row: every new comment and reply goes to the agent like Send now.
-    if (typeof hooks.isAgentAvailable === 'function') {
-      var autoSend = !!getSetting('autoSendToAgent', false);
-      var agentAvailable = !!hooks.isAgentAvailable();
-      html += '<div class="settings-display-row">';
-      html += '<span class="settings-display-label">Send every comment to the agent</span>';
-      html += '<label class="comments-panel-switch">';
-      html += '<input type="checkbox" id="autoSendToAgentToggle" aria-label="Send every comment to the agent"' +
-        (autoSend ? ' checked' : '') + (agentAvailable ? '' : ' disabled title="No agent: none is waiting on the review and agent_cmd is not set"') + '>';
-      html += '<span class="comments-panel-switch-track"><span class="comments-panel-switch-thumb"></span></span>';
-      html += '</label>';
-      html += '</div>';
-    }
-
     html += '</div>'; // close settings-display-group
 
     // ---------- Configuration ----------
@@ -826,13 +812,6 @@
           if (hooks.onHideResolvedChange) hooks.onHideResolvedChange();
         });
       }
-    }
-
-    var asToggle = pane.querySelector('#autoSendToAgentToggle');
-    if (asToggle) {
-      asToggle.addEventListener('change', function () {
-        setSetting('autoSendToAgent', asToggle.checked);
-      });
     }
 
     if (show.ignoreWhitespace && hooks.getIgnoreWhitespace) {
