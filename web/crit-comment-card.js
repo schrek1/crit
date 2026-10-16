@@ -40,6 +40,34 @@
   function alwaysFalse() { return false; }
   function alwaysUndef() { return undefined; }
 
+  function agentStatusHelpers() {
+    if (typeof window !== 'undefined' && window.crit && window.crit.commentCardHelpers) {
+      return window.crit.commentCardHelpers;
+    }
+    return typeof require === 'function' ? require('./crit-comment-card-helpers.js') : null;
+  }
+
+  // buildAgentStatusChip shows where a comment sent to the agent is. A chip
+  // still waiting on the agent flips to "not responding" at its deadline
+  // without a re-render.
+  function buildAgentStatusChip(comment, now) {
+    var helpers = agentStatusHelpers();
+    if (!helpers || !comment.agent_status) return null;
+    var chip = document.createElement('span');
+    function paint() {
+      var state = helpers.effectiveAgentState(comment, now());
+      chip.className = 'agent-status agent-status-' + state;
+      chip.textContent = helpers.agentStateLabel(state);
+    }
+    paint();
+    var wait = helpers.agentStatusDeadlineMs(comment) - now();
+    if (wait > 0 && typeof setTimeout === 'function') {
+      var timer = setTimeout(paint, wait + 50);
+      if (timer && typeof timer.unref === 'function') timer.unref();
+    }
+    return chip;
+  }
+
   function buildCommentCard(comment, filePath, opts) {
     opts = opts || {};
     var deps = opts.deps || {};
@@ -124,6 +152,9 @@
     time.className = 'comment-time';
     time.textContent = formatTime(comment.created_at);
     headerLeft.appendChild(time);
+
+    var agentChip = buildAgentStatusChip(comment, deps.now || Date.now);
+    if (agentChip) headerLeft.appendChild(agentChip);
 
     if (liveOrPending) {
       var badge = document.createElement('span');
