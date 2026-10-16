@@ -1043,6 +1043,7 @@
     session = sessionRes;
     agentLoopActive = !!sessionRes.agent_loop_active;
     agentListening = !!sessionRes.agent_listening;
+    scheduleAgentLoopExpiry(sessionRes.agent_loop_until);
     reviewComments = sessionRes.review_comments || [];
 
     // Fire-and-forget: verify file list endpoint is available for @-mention autocomplete
@@ -5626,6 +5627,16 @@
     }
   }
 
+  // The server sends no event when the grace after the agent left runs out,
+  // so refresh then, or Send now stays offered for an agent that is gone.
+  let agentLoopExpiryTimer = null;
+  function scheduleAgentLoopExpiry(until) {
+    if (agentLoopExpiryTimer) clearTimeout(agentLoopExpiryTimer);
+    agentLoopExpiryTimer = null;
+    const ms = until ? Date.parse(until) - Date.now() : NaN;
+    if (ms > 0) agentLoopExpiryTimer = setTimeout(refreshAgentLoopState, ms + 1000);
+  }
+
   async function refreshAgentLoopState() {
     try {
       const res = await fetch('/api/session');
@@ -5633,6 +5644,7 @@
       const info = await res.json();
       agentLoopActive = !!info.agent_loop_active;
       agentListening = !!info.agent_listening;
+      scheduleAgentLoopExpiry(info.agent_loop_until);
     } catch {
       // Keep the last known state; the next agent-status event retries.
     }
@@ -6732,10 +6744,14 @@
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ comment_id: commentId, file_path: filePath }),
+          }).then(function(agentRes) {
+            // A 400 (no agent left) must free the reply box like a network error.
+            if (!agentRes.ok) throw new Error('Server returned ' + agentRes.status);
           }).catch(function(err) {
             console.error('Error sending reply to agent:', err);
             pendingAgentRequests.delete(commentId);
             showMiniToast('Failed to send to agent');
+            refreshAfterReplyChange(filePath);
           });
         }
 
