@@ -18,6 +18,12 @@ function loadShortcuts(initial) {
 
 test.afterEach(() => { delete global.crit; });
 
+test('Shift+R shows changed files in code review', () => {
+  const { shortcuts } = loadShortcuts();
+  assert.equal(shortcuts.actionForEvent({ key: 'R', code: 'KeyR', shiftKey: true }, 'code-review'), 'show_changes');
+  assert.equal(shortcuts.actionForEvent({ key: 'R', code: 'KeyR', shiftKey: true }, 'live'), '');
+});
+
 test('defaults resolve code-review actions from normalized key events', () => {
   const { shortcuts } = loadShortcuts();
   assert.equal(shortcuts.actionForEvent({ key: 'j', code: 'KeyJ' }, 'code-review'), 'next_block');

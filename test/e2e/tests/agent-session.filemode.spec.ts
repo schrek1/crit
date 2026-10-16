@@ -153,4 +153,16 @@ test.describe('Files changed mid-round — File Mode', () => {
     await expect(page.locator('body')).toContainText(marker);
     await expect(toast).toHaveCount(0);
   });
+
+  test('Shift+R starts the next round while the bar is shown', async ({ page }) => {
+    await loadPage(page);
+    const marker = 'Shortcut round ' + Date.now();
+
+    fs.writeFileSync(planPath, `${originalPlan}\n\n${marker}\n`);
+    await expect(page.locator('.toast-files-changed')).toBeVisible({ timeout: 10000 });
+    await page.locator('body').press('Shift+R');
+
+    await expect(page.locator('body')).toContainText(marker);
+    await expect(page.locator('.toast-files-changed')).toHaveCount(0);
+  });
 });
