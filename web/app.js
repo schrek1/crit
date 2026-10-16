@@ -5197,12 +5197,7 @@
 
     const doSubmit = opts.onSubmit
       ? function() { opts.onSubmit(textarea.value); }
-      : async function() {
-        const isNew = !formObj.editingId;
-        const fp = formObj.filePath;
-        const created = await submitComment(textarea.value, formObj);
-        if (created && isNew) autoSendToAgent(created.id, fp);
-      };
+      : function() { submitComment(textarea.value, formObj); };
     const doCancel = opts.onCancel
       ? function() { opts.onCancel(); }
       : function() { cancelComment(formObj); };
@@ -5601,29 +5596,6 @@
           pendingAgentRequests.delete(c.id);
         }
       }
-    }
-  }
-
-  function autoSendEnabled() {
-    return agentAvailable() && !!getSetting('autoSendToAgent', false);
-  }
-
-  // autoSendToAgent sends a newly saved comment like Send now when the
-  // "Send every comment to the agent" setting is on.
-  async function autoSendToAgent(commentId, filePath) {
-    if (!autoSendEnabled()) return;
-    pendingAgentRequests.add(commentId);
-    try {
-      const res = await fetch('/api/agent/request', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ comment_id: commentId, file_path: filePath }),
-      });
-      if (!res.ok) throw new Error('Server returned ' + res.status);
-    } catch (err) {
-      console.error('Error sending to agent:', err);
-      pendingAgentRequests.delete(commentId);
-      showMiniToast('Failed to send to agent');
     }
   }
 
@@ -6225,10 +6197,7 @@
       submitText: 'Comment',
       initialBody: '',
       autoFocus: false,
-      onSubmit: async function(body) {
-        const created = await addReviewComment(body);
-        if (created) autoSendToAgent(created.id, '');
-      },
+      onSubmit: function(body) { addReviewComment(body); },
       onCancel: function() { cancelReviewCommentForm(); },
     });
   }
@@ -6739,7 +6708,7 @@
         } else {
           comment = reviewComments.find(function(c) { return c.id === commentId; });
         }
-        if (comment && (isLiveThread(comment) || pendingAgentRequests.has(commentId) || autoSendEnabled())) {
+        if (comment && (isLiveThread(comment) || pendingAgentRequests.has(commentId))) {
           pendingAgentRequests.add(commentId);
           fetch('/api/agent/request', {
             method: 'POST',
@@ -9318,7 +9287,6 @@
       getHideResolved: isHideResolved,
       setHideResolved: setHideResolved,
       onHideResolvedChange: function () { refreshHideResolvedView(); },
-      isAgentAvailable: agentAvailable,
       hasActivePendingUpdates: hasActivePendingUpdates,
       syncPendingUpdateButtons: syncPendingUpdateButtons,
       announceCopy: announceCopy,
