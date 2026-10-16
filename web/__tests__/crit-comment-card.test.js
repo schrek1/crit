@@ -236,7 +236,7 @@ test('GitLab badge renders when comment.gitlab_note_id is set', () => {
 
 test('agent status chip shows the effective state', () => {
   const now = Date.parse('2026-10-16T10:20:00.000Z');
-  const deps = Object.assign(baseDeps(), { now: () => now });
+  const deps = Object.assign(baseDeps(), { now: () => now, showAgentStatus: () => true });
   const out = card.buildCommentCard(
     {
       id: 's1', body: 'x', author: 'Ondra', created_at: '2026-10-16T10:00:00Z',
@@ -260,10 +260,22 @@ test('no agent status chip without agent_status', () => {
   assert.equal(findByClass(out.card, 'agent-status').length, 0);
 });
 
+test('no agent status chip while instant replies are off', () => {
+  const out = card.buildCommentCard(
+    {
+      id: 's3', body: 'x', author: 'Ondra', created_at: '2026-10-16T10:00:00Z',
+      agent_status: { state: 'working', updated_at: '2026-10-16T10:00:00.000Z' },
+    },
+    '',
+    { deps: Object.assign(baseDeps(), { showAgentStatus: () => false }) }
+  );
+  assert.equal(findByClass(out.card, 'agent-status').length, 0);
+});
+
 test('repaintAgentChips re-evaluates chips when the agent comes back', () => {
   const now = Date.parse('2026-10-16T10:20:00.000Z');
   let listening = false;
-  const deps = Object.assign(baseDeps(), { now: () => now, isAgentListening: () => listening });
+  const deps = Object.assign(baseDeps(), { now: () => now, isAgentListening: () => listening, showAgentStatus: () => true });
   const out = card.buildCommentCard(
     {
       id: 'r1', body: 'x', author: 'Ondra', created_at: '2026-10-16T10:00:00Z',

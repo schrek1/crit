@@ -167,7 +167,10 @@
     time.textContent = formatTime(comment.created_at);
     headerLeft.appendChild(time);
 
-    var agentChip = buildAgentStatusChip(comment, deps.now || Date.now, deps.isAgentListening || alwaysFalse);
+    var showAgentStatus = deps.showAgentStatus || alwaysFalse;
+    var agentChip = showAgentStatus()
+      ? buildAgentStatusChip(comment, deps.now || Date.now, deps.isAgentListening || alwaysFalse)
+      : null;
     if (agentChip) headerLeft.appendChild(agentChip);
 
     if (liveOrPending) {
