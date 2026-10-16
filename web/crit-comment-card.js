@@ -47,6 +47,14 @@
     return typeof require === 'function' ? require('./crit-comment-card-helpers.js') : null;
   }
 
+  // Repaint hooks of rendered chips, so a change in the agent's state (it came
+  // back to the review) updates them without re-rendering the cards.
+  var chipPainters = new Set();
+
+  function repaintAgentChips() {
+    chipPainters.forEach(function (paint) { paint(); });
+  }
+
   // buildAgentStatusChip shows where a comment sent to the agent is. A chip
   // still waiting on the agent flips to "not responding" at its deadline
   // without a re-render.
@@ -55,11 +63,17 @@
     if (!helpers || !comment.agent_status) return null;
     var chip = document.createElement('span');
     function paint() {
+      if (chip.isConnected === false && chip.dataset.painted) {
+        chipPainters.delete(paint);
+        return;
+      }
+      chip.dataset.painted = '1';
       var state = helpers.effectiveAgentState(comment, now(), { agentListening: isAgentListening() });
       chip.className = 'agent-status agent-status-' + state;
       chip.textContent = helpers.agentStateLabel(state);
     }
     paint();
+    chipPainters.add(paint);
     var wait = helpers.agentStatusDeadlineMs(comment) - now();
     if (wait > 0 && typeof setTimeout === 'function') {
       var timer = setTimeout(paint, wait + 50);
@@ -302,5 +316,6 @@
 
   return {
     buildCommentCard: buildCommentCard,
+    repaintAgentChips: repaintAgentChips,
   };
 });
