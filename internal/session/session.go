@@ -546,6 +546,8 @@ type Session struct {
 	planHook            string // plan_mode | codex while a plan hook waits on review-cycle
 	browserClients      int32  // number of connected SSE browser clients (atomic)
 
+	agent agentChannel
+
 	// Focus is the discriminator that selects what the session is showing.
 	// Defaults to FocusWorkingTree (today's behavior). Range-mode sessions
 	// (--pr / --range) populate this with FocusRange and the SHAs.
@@ -2435,6 +2437,7 @@ func (s *Session) ClearAllComments() {
 	s.lastRoundEdits = 0
 	critPath := s.critJSONPath()
 	s.mu.Unlock()
+	s.ResetAgentChannel()
 	// Full-folder cleanup; idempotent on missing folder.
 	if err := ClearReviewFolder(critPath); err != nil {
 		fmt.Fprintf(os.Stderr, "Warning: removing review folder: %v\n", err)
