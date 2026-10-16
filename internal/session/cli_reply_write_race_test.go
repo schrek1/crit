@@ -93,6 +93,12 @@ func TestDaemonWrite_DoesNotBringBackAReplyTheReviewerDeleted(t *testing.T) {
 	if err := s.SyncWriteFiles(); err != nil {
 		t.Fatal(err)
 	}
+	// The deleted reply and the daemon's last write fall in the same second,
+	// as they do on a fast machine.
+	created, _ := time.Parse(time.RFC3339, old.CreatedAt)
+	s.mu.Lock()
+	s.lastCritJSONMtime = created.Add(500 * time.Millisecond)
+	s.mu.Unlock()
 	cliAddReply(t, s, c.ID, "r_cli", "Written as proposed.")
 	s.DeleteReply("plan.md", c.ID, old.ID)
 
@@ -108,5 +114,43 @@ func TestDaemonWrite_DoesNotBringBackAReplyTheReviewerDeleted(t *testing.T) {
 	}
 	if ids[old.ID] {
 		t.Error("the daemon write brought back the reply the reviewer deleted")
+	}
+}
+
+func TestDaemonWrite_KeepsReviewCommentReplyTheCLIAdded(t *testing.T) {
+	// GIVEN - a written review-level comment, then a CLI reply to it on disk
+	// while another reviewer edit waits in a pending daemon write
+	s := newTestSession(t)
+	rc := s.AddReviewComment("overall: split the plan", "Ondra", "")
+	if err := s.SyncWriteFiles(); err != nil {
+		t.Fatal(err)
+	}
+	path := ReviewPathsFor(s.critJSONPath()).Review
+	data, _ := os.ReadFile(path)
+	var cj CritJSON
+	if err := json.Unmarshal(data, &cj); err != nil {
+		t.Fatal(err)
+	}
+	cj.ReviewComments[0].Replies = append(cj.ReviewComments[0].Replies, Reply{
+		ID: "r_cli", Body: "Split into two plans.", Author: "Claude Code",
+		CreatedAt: time.Now().UTC().Format(time.RFC3339),
+	})
+	out, _ := json.MarshalIndent(cj, "", "  ")
+	if err := os.WriteFile(path, out, 0644); err != nil {
+		t.Fatal(err)
+	}
+	later := time.Now().Add(time.Second)
+	_ = os.Chtimes(path, later, later)
+	s.AddReviewComment("another note", "Ondra", "")
+
+	// WHEN - the daemon writes its state
+	if err := s.SyncWriteFiles(); err != nil {
+		t.Fatal(err)
+	}
+
+	// THEN - the reply is in memory and on disk
+	got, _ := s.FindReviewCommentByID(rc.ID)
+	if len(got.Replies) != 1 || got.Replies[0].ID != "r_cli" {
+		t.Errorf("replies = %+v, want the CLI reply", got.Replies)
 	}
 }
