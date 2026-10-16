@@ -102,7 +102,9 @@
   // A reply by anyone but the comment's author after the last report is the
   // agent's: crit does not know the agent's name in advance. Reply timestamps
   // carry whole seconds, so the report time is truncated before comparing.
-  function effectiveAgentState(comment, nowMs) {
+  // An agent waiting on the review again (opts.agentListening) is alive, so a
+  // passed deadline does not make it "not responding".
+  function effectiveAgentState(comment, nowMs, opts) {
     var st = comment && comment.agent_status;
     if (!st) return '';
     var updated = Date.parse(st.updated_at);
@@ -116,7 +118,8 @@
       }
     }
     var deadline = agentStatusDeadlineMs(comment);
-    if (deadline && nowMs > deadline) return 'not_responding';
+    var listening = !!(opts && opts.agentListening);
+    if (deadline && nowMs > deadline && !listening) return 'not_responding';
     return st.state;
   }
 

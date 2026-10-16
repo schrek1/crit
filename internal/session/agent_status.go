@@ -63,11 +63,15 @@ func awaitsAgent(state string) bool {
 	return state == AgentStateDelivered || state == AgentStateSeen || state == AgentStateWorking
 }
 
-// NewAgentStatus builds a status reported at now. Queued has no deadline;
-// the other states get now+timeout, or DefaultAgentTimeout when timeout <= 0.
+// NoAgentDeadline as a timeout records a status without a deadline.
+const NoAgentDeadline time.Duration = -1
+
+// NewAgentStatus builds a status reported at now. Queued has no deadline, nor
+// does a timeout of NoAgentDeadline; the other states get now+timeout, or
+// DefaultAgentTimeout when timeout is 0.
 func NewAgentStatus(state string, timeout time.Duration, now time.Time) *AgentStatus {
 	st := &AgentStatus{State: state, UpdatedAt: now.UTC().Format(time.RFC3339Nano)}
-	if awaitsAgent(state) {
+	if awaitsAgent(state) && timeout != NoAgentDeadline {
 		if timeout <= 0 {
 			timeout = DefaultAgentTimeout
 		}

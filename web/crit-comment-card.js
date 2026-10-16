@@ -50,12 +50,12 @@
   // buildAgentStatusChip shows where a comment sent to the agent is. A chip
   // still waiting on the agent flips to "not responding" at its deadline
   // without a re-render.
-  function buildAgentStatusChip(comment, now) {
+  function buildAgentStatusChip(comment, now, isAgentListening) {
     var helpers = agentStatusHelpers();
     if (!helpers || !comment.agent_status) return null;
     var chip = document.createElement('span');
     function paint() {
-      var state = helpers.effectiveAgentState(comment, now());
+      var state = helpers.effectiveAgentState(comment, now(), { agentListening: isAgentListening() });
       chip.className = 'agent-status agent-status-' + state;
       chip.textContent = helpers.agentStateLabel(state);
     }
@@ -153,7 +153,7 @@
     time.textContent = formatTime(comment.created_at);
     headerLeft.appendChild(time);
 
-    var agentChip = buildAgentStatusChip(comment, deps.now || Date.now);
+    var agentChip = buildAgentStatusChip(comment, deps.now || Date.now, deps.isAgentListening || alwaysFalse);
     if (agentChip) headerLeft.appendChild(agentChip);
 
     if (liveOrPending) {
