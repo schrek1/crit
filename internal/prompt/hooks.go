@@ -6,6 +6,7 @@ const (
 	HookFinishUnresolved = "on_finish_unresolved"
 	HookFinishApproved   = "on_finish_approved"
 	HookStoryGenerate    = "on_story_generate"
+	HookAgentRequest     = "on_agent_request"
 )
 
 // PromptMode maps a session to the user-facing hook mode suffix.

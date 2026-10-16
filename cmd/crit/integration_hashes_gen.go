@@ -76,6 +76,7 @@ var integrationHashes = map[string]string{
 	"integrations/pi/skills/crit/SKILL.md":                       "9eb63b0634cc1daf5ff73cede9fcba05a52a92774afeb703e4ee4d8be2aa28f3",
 	"integrations/prompts/examples/on_finish_approved.md":        "d62d9996d95936afd669738d60977dea2641fcf9ddd37c8e9d8d98fae7a7f181",
 	"integrations/prompts/examples/on_finish_unresolved.diff.md": "69b574f50e2614740ec3a5cb3cfcaca2a241ae53e0fe13d5aee053adc5d91e51",
+	"integrations/prompts/on_agent_request.md":                   "df64b2ec2912e19d7b51979b44e1d782a862502caaa370e058037d4033d8b8d8",
 	"integrations/prompts/on_finish_approved.md":                 "12b79ce1f7251ca00d16bf9a9af295215a55a3d69c8f264d5002404309b0a4e7",
 	"integrations/prompts/on_finish_approved.story.md":           "6c64b28fbb2923155af010cc3e98fe97fe861f42d4a7e7dbc1c27a73fb31f3e6",
 	"integrations/prompts/on_finish_unresolved.md":               "675d8bccfc1504bbe54c774b3326968a6e5da27c0bd1f338dd2e427663f858c7",

@@ -10,6 +10,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/tomasz-tomczyk/crit/internal/comment"
 	"github.com/tomasz-tomczyk/crit/internal/config"
 	"github.com/tomasz-tomczyk/crit/internal/hooks"
 	"github.com/tomasz-tomczyk/crit/internal/prompt"
@@ -132,6 +133,24 @@ func filesWithUnresolvedComments(sess *Session) []string {
 		}
 	}
 	return out
+}
+
+// renderAgentRequestPrompt renders the on_agent_request prompt for comments
+// delivered to the waiting agent mid-round.
+func (s *Server) renderAgentRequestPrompt(comments []comment.ListedComment, nextCommand string) string {
+	globalPrompts, projectPrompts, trust := s.loadPromptConfig()
+	commentsJSON, _ := json.Marshal(comments)
+	data := map[string]any{
+		"comments_json":  string(commentsJSON),
+		"comment_count":  len(comments),
+		"next_round_cmd": nextCommand,
+	}
+	result, err := prompt.RenderHook(globalPrompts, projectPrompts, s.projectDir, s.homeDir, trust.UseProject, prompt.HookAgentRequest, data)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Warning: %v\n", err)
+		return string(commentsJSON)
+	}
+	return strings.TrimRight(result.Text, "\n")
 }
 
 // runFinishHooks resolves and executes the configured command hook for the
