@@ -63,3 +63,8 @@ test('agentStatusDeadlineMs returns the deadline only while the agent owes an an
   assert.equal(helpers.agentStatusDeadlineMs(withStatus('queued', T0, 0)), 0);
   assert.equal(helpers.agentStatusDeadlineMs({ id: 'c1' }), 0);
 });
+
+test('effectiveAgentState is not not_responding while the agent listens', () => {
+  const c = withStatus('delivered', T0, 15 * MIN);
+  assert.equal(helpers.effectiveAgentState(c, T0 + 16 * MIN, { agentListening: true }), 'delivered');
+});
