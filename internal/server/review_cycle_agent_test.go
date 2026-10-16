@@ -13,6 +13,14 @@ import (
 	"github.com/tomasz-tomczyk/crit/internal/review"
 )
 
+// newInstantServer is a test server with agent_instant_replies on.
+func newInstantServer(t *testing.T) (*Server, *Session) {
+	t.Helper()
+	s, session := newTestServer(t)
+	s.cfg.AgentInstantReplies = true
+	return s, session
+}
+
 // startReviewCycle runs POST /api/review-cycle in the background, the way a
 // waiting `crit` client does, and returns the channel its response lands on.
 func startReviewCycle(t *testing.T, s *Server, query string) <-chan *httptest.ResponseRecorder {
@@ -70,7 +78,7 @@ func markAgentLoopActive(session *Session) {
 }
 
 func TestReviewCycle_LiveDeliveryReturnsAgentRequest(t *testing.T) {
-	s, session := newTestServer(t)
+	s, session := newInstantServer(t)
 	session.SetAwaitingFirstReview(true)
 	c, _ := session.AddComment("test.md", 1, 1, "", "why line1?", "", "reviewer", "")
 	done := startReviewCycle(t, s, "")
@@ -103,7 +111,7 @@ func TestReviewCycle_LiveDeliveryReturnsAgentRequest(t *testing.T) {
 // overwrite it, so the delivered status must be on disk before review-cycle
 // returns.
 func TestReviewCycle_LiveDeliveryPersistsStatusBeforeReturning(t *testing.T) {
-	s, session := newTestServer(t)
+	s, session := newInstantServer(t)
 	session.SetAwaitingFirstReview(true)
 	c, _ := session.AddComment("test.md", 1, 1, "", "persist me", "", "reviewer", "")
 	done := startReviewCycle(t, s, "")
@@ -116,7 +124,7 @@ func TestReviewCycle_LiveDeliveryPersistsStatusBeforeReturning(t *testing.T) {
 }
 
 func TestReviewCycle_FinishPersistsStatusBeforeReturning(t *testing.T) {
-	s, session := newTestServer(t)
+	s, session := newInstantServer(t)
 	session.SetAwaitingFirstReview(true)
 	c, _ := session.AddComment("test.md", 1, 1, "", "persist me", "", "reviewer", "")
 	done := startReviewCycle(t, s, "")
@@ -146,7 +154,7 @@ func assertDeliveredOnDisk(t *testing.T, session *Session, commentID string) {
 }
 
 func TestReviewCycle_QueuedRequestReturnsImmediately(t *testing.T) {
-	s, session := newTestServer(t)
+	s, session := newInstantServer(t)
 	session.SetAwaitingFirstReview(true)
 	c, _ := session.AddComment("test.md", 1, 1, "", "queued", "", "reviewer", "")
 	markAgentLoopActive(session)
@@ -167,7 +175,7 @@ func TestReviewCycle_QueuedRequestReturnsImmediately(t *testing.T) {
 }
 
 func TestReviewCycle_NoRoundCompleteAfterLiveDelivery(t *testing.T) {
-	s, session := newTestServer(t)
+	s, session := newInstantServer(t)
 	// A later round: the agent's first call completes the previous round.
 	session.SetAwaitingFirstReview(false)
 	first := startReviewCycle(t, s, "")
@@ -193,7 +201,7 @@ func TestReviewCycle_NoRoundCompleteAfterLiveDelivery(t *testing.T) {
 }
 
 func TestReviewCycle_RoundCompleteKeepsQueuedRequests(t *testing.T) {
-	s, session := newTestServer(t)
+	s, session := newInstantServer(t)
 	// The agent is busy with a Finish batch and the reviewer sends a new
 	// comment. The agent's next call completes the round, which clears the
 	// in-memory comments until the watcher carries them forward — the
@@ -215,7 +223,7 @@ func TestReviewCycle_RoundCompleteKeepsQueuedRequests(t *testing.T) {
 }
 
 func TestReviewCycle_RoundCompletesAfterFinish(t *testing.T) {
-	s, session := newTestServer(t)
+	s, session := newInstantServer(t)
 	session.SetAwaitingFirstReview(false)
 	session.AddComment("test.md", 1, 1, "", "fix", "", "reviewer", "")
 	first := startReviewCycle(t, s, "")
@@ -234,7 +242,7 @@ func TestReviewCycle_RoundCompletesAfterFinish(t *testing.T) {
 }
 
 func TestFinish_QueuedWhenNoListener(t *testing.T) {
-	s, session := newTestServer(t)
+	s, session := newInstantServer(t)
 	session.SetAwaitingFirstReview(true)
 	session.AddComment("test.md", 1, 1, "", "fix", "", "reviewer", "")
 
@@ -247,7 +255,7 @@ func TestFinish_QueuedWhenNoListener(t *testing.T) {
 }
 
 func TestReviewCycle_FinishWinsOverQueuedRequest(t *testing.T) {
-	s, session := newTestServer(t)
+	s, session := newInstantServer(t)
 	session.SetAwaitingFirstReview(true)
 	c, _ := session.AddComment("test.md", 1, 1, "", "fix", "", "reviewer", "")
 	markAgentLoopActive(session)
@@ -265,7 +273,7 @@ func TestReviewCycle_FinishWinsOverQueuedRequest(t *testing.T) {
 }
 
 func TestReviewCycle_TwoListenersOneDelivery(t *testing.T) {
-	s, session := newTestServer(t)
+	s, session := newInstantServer(t)
 	session.SetAwaitingFirstReview(true)
 	c, _ := session.AddComment("test.md", 1, 1, "", "one agent only", "", "reviewer", "")
 	first := startReviewCycle(t, s, "")
@@ -301,7 +309,7 @@ func assertAgentRequest(t *testing.T, w *httptest.ResponseRecorder) {
 }
 
 func TestReviewCycle_SkipsDeletedQueuedComment(t *testing.T) {
-	s, session := newTestServer(t)
+	s, session := newInstantServer(t)
 	session.SetAwaitingFirstReview(true)
 	c, _ := session.AddComment("test.md", 1, 1, "", "deleted later", "", "reviewer", "")
 	markAgentLoopActive(session)
@@ -320,7 +328,7 @@ func TestReviewCycle_SkipsDeletedQueuedComment(t *testing.T) {
 }
 
 func TestFinish_ApproveClearsAgentQueue(t *testing.T) {
-	s, session := newTestServer(t)
+	s, session := newInstantServer(t)
 	session.SetAwaitingFirstReview(true)
 	c, _ := session.AddComment("test.md", 1, 1, "", "resolved before Finish", "", "reviewer", "")
 	markAgentLoopActive(session)
@@ -341,7 +349,7 @@ func TestFinish_ApproveClearsAgentQueue(t *testing.T) {
 }
 
 func TestAgentRequest_PlanHookListenerIsIgnored(t *testing.T) {
-	s, session := newTestServer(t)
+	s, session := newInstantServer(t)
 	session.Mode = "plan"
 	session.SetAwaitingFirstReview(true)
 	c, _ := session.AddComment("test.md", 1, 1, "", "plan comment", "", "reviewer", "")
@@ -359,7 +367,7 @@ func TestAgentRequest_PlanHookListenerIsIgnored(t *testing.T) {
 }
 
 func TestFinish_MarksUnansweredCommentsDelivered(t *testing.T) {
-	s, session := newTestServer(t)
+	s, session := newInstantServer(t)
 	session.SetAwaitingFirstReview(true)
 	open, _ := session.AddComment("test.md", 1, 1, "", "unanswered", "", "reviewer", "")
 	answered, _ := session.AddComment("test.md", 2, 2, "", "answered", "", "reviewer", "")
@@ -386,7 +394,7 @@ func TestFinish_MarksUnansweredCommentsDelivered(t *testing.T) {
 }
 
 func TestSession_ReportsAgentLoop(t *testing.T) {
-	s, session := newTestServer(t)
+	s, session := newInstantServer(t)
 	done := startReviewCycle(t, s, "")
 	waitForSubscriberCount(t, session, 1)
 
@@ -407,7 +415,7 @@ func TestSession_ReportsAgentLoop(t *testing.T) {
 // In a `crit plan --name` loop the plain `crit comment` form does not reliably
 // find the plan's review file, so the live prompt must target the plan.
 func TestReviewCycle_LiveDeliveryPromptTargetsPlan(t *testing.T) {
-	s, session := newTestServer(t)
+	s, session := newInstantServer(t)
 	session.Mode = "plan"
 	session.PlanDir = filepath.Join(t.TempDir(), "my-plan")
 	session.SetAwaitingFirstReview(true)
@@ -428,7 +436,7 @@ func TestReviewCycle_LiveDeliveryPromptTargetsPlan(t *testing.T) {
 // watcher's poll window, while the daemon has its own unwritten change. The
 // flush before the next delivery must not overwrite that reply.
 func TestReviewCycle_DeliveryKeepsAgentReplyFromDisk(t *testing.T) {
-	s, session := newTestServer(t)
+	s, session := newInstantServer(t)
 	session.SetAwaitingFirstReview(true)
 	answered, _ := session.AddComment("test.md", 1, 1, "", "answered from the CLI", "", "reviewer", "")
 	if err := session.SyncWriteFiles(); err != nil {
@@ -477,7 +485,7 @@ func writeAgentReplyOnDisk(t *testing.T, session *Session, commentID, replyID, b
 // Between two crit calls the loop counts as active for a grace period; the
 // browser needs its end to stop offering Send now when the agent is gone.
 func TestSession_ReportsAgentLoopExpiry(t *testing.T) {
-	s, session := newTestServer(t)
+	s, session := newInstantServer(t)
 	markAgentLoopActive(session)
 	left := time.Now()
 

@@ -82,10 +82,10 @@ type finishEventData struct {
 }
 
 // writeCycleFinish answers a review-cycle with a Finish event's content. A
-// Finish supersedes queued live requests. Comments the agent has not answered
-// yet are marked delivered without a deadline — agents that never report
-// status work through a Finish batch for as long as it takes — and answered
-// threads keep their status.
+// Finish supersedes queued live requests. With agent_instant_replies on,
+// comments the agent has not answered yet are marked delivered without a
+// deadline — agents that never report status work through a Finish batch for
+// as long as it takes — and answered threads keep their status.
 func (s *Server) writeCycleFinish(w http.ResponseWriter, sess *Session, content string) {
 	sess.SetAwaitingFirstReview(false)
 	sess.ClearAgentRequests()
@@ -93,12 +93,14 @@ func (s *Server) writeCycleFinish(w http.ResponseWriter, sess *Session, content 
 
 	var finishData finishEventData
 	json.Unmarshal([]byte(content), &finishData)
-	for _, listed := range finishData.Comments {
-		if awaitsAgentReply(listed.Comment) {
-			sess.SetCommentAgentStatus(pathOf(listed), listed.ID, session.AgentStateDelivered, session.NoAgentDeadline)
+	if s.cfg.AgentInstantReplies {
+		for _, listed := range finishData.Comments {
+			if awaitsAgentReply(listed.Comment) {
+				sess.SetCommentAgentStatus(pathOf(listed), listed.ID, session.AgentStateDelivered, session.NoAgentDeadline)
+			}
 		}
+		flushBeforeAgentActs(sess)
 	}
-	flushBeforeAgentActs(sess)
 	nextCommand := finishData.NextCommand
 	if nextCommand == "" {
 		nextCommand = session.NextRoundCommand(sess)
