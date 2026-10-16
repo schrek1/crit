@@ -542,6 +542,50 @@ body {
 }
 .toast.error .toast-btn-filled:hover { filter: brightness(1.1); }
 .toast-actions { display: flex; gap: 6px; flex-shrink: 0; }
+.toast.toast-files-changed {
+  padding: 6px 8px 6px 14px;
+  background: color-mix(in srgb, var(--crit-live-fg) 12%, var(--crit-editor-bg));
+  border: 1px solid color-mix(in srgb, var(--crit-live-fg) 40%, transparent);
+  color: var(--crit-editor-fg);
+}
+.toast-files-changed .toast-btn-filled { background: var(--crit-live-fg); }
+.toast-files-changed-text { display: flex; align-items: center; gap: 8px; }
+.toast-files-changed-info {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 16px;
+  height: 16px;
+  border-radius: 50%;
+  border: 1px solid currentColor;
+  font-size: 11px;
+  font-weight: 600;
+  font-style: italic;
+  opacity: 0.6;
+  cursor: help;
+}
+.toast-files-changed-info:hover, .toast-files-changed-info:focus-visible { opacity: 1; }
+.toast-files-changed-info { position: relative; }
+.toast-files-changed-info:hover::after, .toast-files-changed-info:focus-visible::after {
+  content: attr(data-hint);
+  position: absolute;
+  top: calc(100% + 10px);
+  left: -8px;
+  width: 340px;
+  padding: 8px 10px;
+  border-radius: 6px;
+  background: var(--crit-editor-bg);
+  border: 1px solid color-mix(in srgb, var(--crit-live-fg) 40%, transparent);
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.25);
+  color: var(--crit-editor-fg);
+  font-size: 12px;
+  font-style: normal;
+  font-weight: 400;
+  line-height: 1.45;
+  white-space: normal;
+  z-index: 1;
+}
+.toast-files-changed .toast-btn-filled:hover { filter: brightness(1.1); }
 
 .btn-success {
   color: var(--crit-green);
