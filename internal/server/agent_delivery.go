@@ -2,6 +2,7 @@ package server
 
 import (
 	"encoding/json"
+	"log"
 	"net/http"
 
 	"github.com/tomasz-tomczyk/crit/internal/comment"
@@ -27,6 +28,7 @@ func (s *Server) writeLiveDelivery(w http.ResponseWriter, sess *Session) bool {
 	for _, listed := range delivered {
 		sess.SetCommentAgentStatus(pathOf(listed), listed.ID, session.AgentStateDelivered, 0)
 	}
+	flushBeforeAgentActs(sess)
 	sess.MarkLastCycleLive(true)
 	nextCommand := session.NextRoundCommand(sess)
 	writeJSON(w, map[string]any{
@@ -94,6 +96,7 @@ func (s *Server) writeCycleFinish(w http.ResponseWriter, sess *Session, content 
 			sess.SetCommentAgentStatus(pathOf(listed), listed.ID, session.AgentStateDelivered, 0)
 		}
 	}
+	flushBeforeAgentActs(sess)
 	nextCommand := finishData.NextCommand
 	if nextCommand == "" {
 		nextCommand = session.NextRoundCommand(sess)
@@ -111,6 +114,15 @@ func (s *Server) writeCycleFinish(w http.ResponseWriter, sess *Session, content 
 		cycleResp["close_on_approve_after_ms"] = *finishData.CloseOnApproveAfterMs
 	}
 	writeJSON(w, cycleResp)
+}
+
+// flushBeforeAgentActs writes the review file before the agent gets its
+// comments. The agent's `crit comment` writes that file at once, and a
+// debounced daemon write landing afterwards would overwrite its reply.
+func flushBeforeAgentActs(sess *Session) {
+	if err := sess.SyncWriteFiles(); err != nil {
+		log.Printf("agent delivery: writing review file: %v", err)
+	}
 }
 
 // awaitsAgentReply reports whether the reviewer had the last word in c.
