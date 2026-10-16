@@ -419,3 +419,53 @@ func TestReviewCycle_LiveDeliveryPromptTargetsPlan(t *testing.T) {
 		t.Errorf("plan-mode prompt = %q, want --plan my-plan on reply and status commands", prompt)
 	}
 }
+
+// The agent replies from the CLI (review file) and runs crit again within the
+// watcher's poll window, while the daemon has its own unwritten change. The
+// flush before the next delivery must not overwrite that reply.
+func TestReviewCycle_DeliveryKeepsAgentReplyFromDisk(t *testing.T) {
+	s, session := newTestServer(t)
+	session.SetAwaitingFirstReview(true)
+	answered, _ := session.AddComment("test.md", 1, 1, "", "answered from the CLI", "", "reviewer", "")
+	if err := session.SyncWriteFiles(); err != nil {
+		t.Fatal(err)
+	}
+	writeAgentReplyOnDisk(t, session, answered.ID, "rp_cli", "done from the CLI")
+	markAgentLoopActive(session)
+	next, _ := session.AddComment("test.md", 2, 2, "", "queued next", "", "reviewer", "")
+	sendNow(t, s, next.ID, "test.md")
+
+	awaitCycle(t, startReviewCycle(t, s, ""))
+
+	cj, err := review.LoadCritJSON(session.CritJSONPath())
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, c := range cj.Files["test.md"].Comments {
+		if c.ID == answered.ID {
+			if len(c.Replies) != 1 || c.Replies[0].ID != "rp_cli" {
+				t.Errorf("replies on disk = %+v, want the agent's CLI reply kept", c.Replies)
+			}
+			return
+		}
+	}
+	t.Fatalf("comment %s missing from the review file", answered.ID)
+}
+
+func writeAgentReplyOnDisk(t *testing.T, session *Session, commentID, replyID, body string) {
+	t.Helper()
+	cj, err := review.LoadCritJSON(session.CritJSONPath())
+	if err != nil {
+		t.Fatal(err)
+	}
+	f := cj.Files["test.md"]
+	for i := range f.Comments {
+		if f.Comments[i].ID == commentID {
+			f.Comments[i].Replies = append(f.Comments[i].Replies, Reply{ID: replyID, Body: body, Author: "Claude Code", CreatedAt: time.Now().UTC().Format(time.RFC3339)})
+		}
+	}
+	cj.Files["test.md"] = f
+	if err := review.SaveCritJSON(session.CritJSONPath(), cj); err != nil {
+		t.Fatal(err)
+	}
+}
