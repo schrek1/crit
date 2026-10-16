@@ -464,6 +464,9 @@
   let prData = null;     // PR metadata from /api/config (set once on load)
   let agentEnabled = false;
   let agentName = 'agent';
+  // An agent waits on the review through `crit` (or just left to work on a
+  // delivery); Send now reaches it without agent_cmd.
+  let agentLoopActive = false;
   const pendingAgentRequests = new Set();
 
   // Track active reply form state so it survives DOM re-renders (commentId → { text })
@@ -971,6 +974,7 @@
     sessionRes = await hydrateStoryIfMissing(sessionRes);
     sessionRes = await hydrateFullSessionForStoryIfNeeded(sessionRes);
     session = sessionRes;
+    agentLoopActive = !!sessionRes.agent_loop_active;
     reviewComments = sessionRes.review_comments || [];
 
     // Fire-and-forget: verify file list endpoint is available for @-mention autocomplete
@@ -4782,7 +4786,7 @@
     actions.appendChild(submitBtn);
 
     // Callers put editingId on formObj, not opts.
-    if (agentEnabled && !opts.editingId && !formObj.editingId) {
+    if (agentAvailable() && !opts.editingId && !formObj.editingId) {
       const sendBtn = document.createElement('button');
       sendBtn.className = 'btn btn-sm btn-agent';
       sendBtn.innerHTML = '<svg viewBox="0 0 24 24" width="12" height="12" fill="currentColor" style="vertical-align: -1px"><polygon points="13 2 3 14 12 14 11 22 21 10 12 10"/></svg> Send now';
@@ -5123,19 +5127,41 @@
   }
 
   // ===== Agent Button =====
+  function agentAvailable() {
+    return agentEnabled || agentLoopActive;
+  }
+
+  // The waiting agent signs its replies with its own name, not agent_cmd's.
+  function pendingAgentName() {
+    return agentLoopActive ? 'agent' : agentName;
+  }
+
   function isLiveThread(comment) {
-    if (!agentEnabled) return false;
+    if (!agentAvailable()) return false;
     return !!comment.live;
   }
 
+  // A reply by anyone but the comment's author answers a pending request:
+  // the waiting agent's name is not known in advance.
   function checkAgentReplies(comments) {
     for (const c of comments) {
       if (pendingAgentRequests.has(c.id) && c.replies && c.replies.length > 0) {
         const lastReply = c.replies[c.replies.length - 1];
-        if (lastReply.author === agentName) {
+        if (lastReply.author !== c.author) {
           pendingAgentRequests.delete(c.id);
         }
       }
+    }
+  }
+
+  async function refreshAgentLoopState() {
+    try {
+      const res = await fetch('/api/session');
+      if (!res.ok) return;
+      const info = await res.json();
+      agentLoopActive = !!info.agent_loop_active;
+    } catch {
+      // Keep the last known state; the next agent-status event retries.
     }
   }
 
@@ -5176,7 +5202,7 @@
       formatTime: formatTime,
       authorColorIndex: authorColorIndex,
       getReviewRound: function () { return session && session.review_round; },
-      getAgentName: function () { return agentName; },
+      getAgentName: pendingAgentName,
       buildCommentEnv: buildCommentEnv,
       renderReplyList: renderReplyList,
       createReplyInput: createReplyInput,
@@ -6076,14 +6102,14 @@
     const input = document.createElement('input');
     input.type = 'text';
     input.className = 'reply-input';
-    input.placeholder = isPending ? 'Waiting for @' + agentName + '\u2026' : 'Write a reply\u2026';
+    input.placeholder = isPending ? 'Waiting for @' + pendingAgentName() + '\u2026' : 'Write a reply\u2026';
     if (isPending) input.disabled = true;
     form.appendChild(input);
 
     // Expanded state elements (hidden initially)
     const textarea = document.createElement('textarea');
     textarea.className = 'reply-textarea';
-    textarea.placeholder = isPending ? 'Waiting for @' + agentName + '\u2026' : 'Write a reply\u2026';
+    textarea.placeholder = isPending ? 'Waiting for @' + pendingAgentName() + '\u2026' : 'Write a reply\u2026';
     textarea.rows = 3;
     if (isPending) textarea.disabled = true;
 
@@ -7068,6 +7094,9 @@
           }
         }
       } catch {}
+      },
+      'agent-status': function() {
+        refreshAgentLoopState();
       },
       'comments-changed': async function() {
       try {

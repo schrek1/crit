@@ -84,6 +84,55 @@
     return 'pin';
   }
 
+  // Agent status — mirrors Go's session.EffectiveAgentState. Stored states are
+  // queued/delivered/seen/working; replied and not_responding are derived.
+  var AGENT_STATE_LABELS = {
+    queued: 'Queued',
+    delivered: 'Delivered',
+    seen: 'Seen',
+    working: 'Working',
+    replied: 'Replied',
+    not_responding: 'Agent not responding',
+  };
+
+  function agentAwaits(state) {
+    return state === 'delivered' || state === 'seen' || state === 'working';
+  }
+
+  // A reply by anyone but the comment's author after the last report is the
+  // agent's: crit does not know the agent's name in advance. Reply timestamps
+  // carry whole seconds, so the report time is truncated before comparing.
+  function effectiveAgentState(comment, nowMs) {
+    var st = comment && comment.agent_status;
+    if (!st) return '';
+    var updated = Date.parse(st.updated_at);
+    if (!isNaN(updated)) {
+      var updatedSec = Math.floor(updated / 1000) * 1000;
+      var replies = comment.replies || [];
+      for (var i = 0; i < replies.length; i++) {
+        if (replies[i].author === comment.author) continue;
+        var created = Date.parse(replies[i].created_at);
+        if (!isNaN(created) && created >= updatedSec) return 'replied';
+      }
+    }
+    var deadline = agentStatusDeadlineMs(comment);
+    if (deadline && nowMs > deadline) return 'not_responding';
+    return st.state;
+  }
+
+  function agentStateLabel(state) {
+    return AGENT_STATE_LABELS[state] || state;
+  }
+
+  // agentStatusDeadlineMs returns when the comment turns "not responding", or
+  // 0 when the agent does not owe an answer (no status, queued, no deadline).
+  function agentStatusDeadlineMs(comment) {
+    var st = comment && comment.agent_status;
+    if (!st || !st.deadline_at || !agentAwaits(st.state)) return 0;
+    var deadline = Date.parse(st.deadline_at);
+    return isNaN(deadline) ? 0 : deadline;
+  }
+
   // Standard class strings. These are deliberately simple constants so that
   // both renderers stay in sync if we tweak them later. Adding a class here
   // does NOT make every existing card pick it up — call sites still need to
@@ -102,6 +151,9 @@
     formatTime: formatTime,
     formKeyFor: formKeyFor,
     authorColorIndex: authorColorIndex,
+    effectiveAgentState: effectiveAgentState,
+    agentStateLabel: agentStateLabel,
+    agentStatusDeadlineMs: agentStatusDeadlineMs,
     AUTHOR_COLOR_COUNT: AUTHOR_COLOR_COUNT,
     BTN_CLASS: BTN_CLASS,
     BTN_SM_CLASS: BTN_SM_CLASS,
