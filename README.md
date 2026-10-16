@@ -313,6 +313,24 @@ After the first agent interaction, the comment becomes a **live thread**:
 | Cursor (experimental) | `cursor --pipe`          |
 
 > **Tip:** Claude Code still prompts for permission in `-p` mode. To let it edit files freely, use `claude --dangerously-skip-permissions -p` instead. The other agents already operate without permission prompts in their pipe/non-interactive modes.
+
+#### Send to the agent that is already waiting
+
+When your agent runs the review loop (`crit` waiting for Finish Review), "Send now" goes to **that** agent instead of starting `agent_cmd` — no `agent_cmd` needed, and the agent answers with the context of the conversation the review came from.
+
+- The agent's `crit` returns at once with the comment: `approved: false` plus an `event: agent_request` line on stderr, and the [`on_agent_request`](docs/agent-prompts.md) prompt on stdout. It replies and runs `crit` again; the round does not end, so your open drafts stay.
+- If the agent is busy between two `crit` calls, the comment waits in a queue and its next `crit` returns at once. A Finish Review clicked meanwhile is kept the same way.
+- Replies in the thread go to the agent too (live thread). The waiting agent wins over `agent_cmd` when both are available.
+- Settings → **Send every comment to the agent** sends each new comment and reply like "Send now" (works with `agent_cmd` too; off by default, stored in a browser cookie).
+
+#### Agent status
+
+A comment sent to the agent shows where it is: **Queued**, **Delivered**, **Seen**, **Working**, **Replied**, or **Agent not responding** (no report or reply within 15 minutes). The agent reports *seen* and *working* itself:
+
+```bash
+crit comment --status seen c_a1b2c3
+crit comment --status working --timeout 45m c_a1b2c3   # each report resets the limit
+```
 >
 > You can also specify a model with `--model` (e.g. `claude --model sonnet -p`).
 
