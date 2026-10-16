@@ -63,9 +63,9 @@ func awaitsAgent(state string) bool {
 	return state == AgentStateDelivered || state == AgentStateSeen || state == AgentStateWorking
 }
 
-// newAgentStatus builds a status reported at now. Queued has no deadline;
+// NewAgentStatus builds a status reported at now. Queued has no deadline;
 // the other states get now+timeout, or DefaultAgentTimeout when timeout <= 0.
-func newAgentStatus(state string, timeout time.Duration, now time.Time) *AgentStatus {
+func NewAgentStatus(state string, timeout time.Duration, now time.Time) *AgentStatus {
 	st := &AgentStatus{State: state, UpdatedAt: now.UTC().Format(time.RFC3339Nano)}
 	if awaitsAgent(state) {
 		if timeout <= 0 {
@@ -79,7 +79,7 @@ func newAgentStatus(state string, timeout time.Duration, now time.Time) *AgentSt
 // SetCommentAgentStatus records an agent status on a comment; filePath ""
 // targets a review-level comment. Notifies the browser on success.
 func (s *Session) SetCommentAgentStatus(filePath, commentID, state string, timeout time.Duration) bool {
-	st := newAgentStatus(state, timeout, time.Now())
+	st := NewAgentStatus(state, timeout, time.Now())
 	s.mu.Lock()
 	found := false
 	if filePath == "" {
