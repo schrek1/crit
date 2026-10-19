@@ -5653,6 +5653,23 @@
     }
   }
 
+  // A live exchange moves the agent status several times (queued, delivered,
+  // working, done). When nothing else changed, repaint the status chips
+  // instead of re-rendering the document, which shifts what the reader sees.
+  // Returns false when the caller must re-render.
+  function applyAgentStatusOnlyChange(previousComments, comments) {
+    const withoutStatus = function(key, value) { return key === 'agent_status' ? undefined : value; };
+    if (JSON.stringify(previousComments || [], withoutStatus) !== JSON.stringify(comments || [], withoutStatus)) return false;
+    const previousStatus = new Map((previousComments || []).map(function(comment) {
+      return [comment.id, JSON.stringify(comment.agent_status || null)];
+    }));
+    for (const comment of comments || []) {
+      if (previousStatus.get(comment.id) === JSON.stringify(comment.agent_status || null)) continue;
+      if (!window.crit.commentCard.applyAgentStatus(comment.id, comment.agent_status)) return false;
+    }
+    return true;
+  }
+
   // The server sends no event when the grace after the agent left runs out,
   // so refresh then, or Send now stays offered for an agent that is gone.
   let agentLoopExpiryTimer = null;
@@ -7692,10 +7709,13 @@
         // Only re-fetch comments data, not file content or diffs (those only
         // change on file-changed events), in one request for all files.
         const previousCommentSignatures = new Map();
+        const previousComments = new Map();
         for (let i = 0; i < files.length; i++) {
           previousCommentSignatures.set(files[i].path, JSON.stringify(files[i].comments || []));
+          previousComments.set(files[i].path, files[i].comments || []);
         }
         const previousReviewSignature = JSON.stringify(reviewComments || []);
+        const previousReviewComments = reviewComments || [];
         applyAllFileComments(await fetchAllFileComments());
         // Also refresh review-level comments
         try {
@@ -7731,10 +7751,12 @@
           const before = previousCommentSignatures.get(files[i].path) || '[]';
           const after = JSON.stringify(files[i].comments || []);
           if (before === after) continue;
+          if (applyAgentStatusOnlyChange(previousComments.get(files[i].path), files[i].comments)) continue;
           if (inStory) renderStoryFileByPath(files[i].path);
           else renderFileByPath(files[i].path);
         }
-        if (!inStory && JSON.stringify(reviewComments || []) !== previousReviewSignature) {
+        if (!inStory && JSON.stringify(reviewComments || []) !== previousReviewSignature &&
+            !applyAgentStatusOnlyChange(previousReviewComments, reviewComments)) {
           renderReviewConversation();
         }
         updateCommentCount();

@@ -292,3 +292,35 @@ test('repaintAgentChips re-evaluates chips when the agent comes back', () => {
 
   assert.equal(chip.textContent, 'Working');
 });
+
+test('applyAgentStatus repaints the rendered chip in place', () => {
+  const now = Date.parse('2026-10-16T10:01:00.000Z');
+  const deps = Object.assign(baseDeps(), { now: () => now, isAgentListening: () => true, showAgentStatus: () => true });
+  const out = card.buildCommentCard(
+    {
+      id: 'a1', body: 'x', author: 'Ondra', created_at: '2026-10-16T10:00:00Z',
+      agent_status: { state: 'delivered', updated_at: '2026-10-16T10:00:00.000Z' },
+    },
+    '',
+    { deps: deps }
+  );
+  const chip = findByClass(out.card, 'agent-status')[0];
+
+  const applied = card.applyAgentStatus('a1', { state: 'working', updated_at: '2026-10-16T10:00:30.000Z' });
+
+  assert.equal(applied, true);
+  assert.equal(chip.textContent, 'Working');
+  assert.equal(chip.classList.contains('agent-status-working'), true);
+});
+
+test('applyAgentStatus reports a comment without a rendered chip', () => {
+  card.buildCommentCard(
+    { id: 'a2', body: 'x', created_at: '2024-01-01T00:00:00Z' },
+    '',
+    { deps: Object.assign(baseDeps(), { showAgentStatus: () => true }) }
+  );
+
+  const applied = card.applyAgentStatus('a2', { state: 'queued', updated_at: '2026-10-16T10:00:00.000Z' });
+
+  assert.equal(applied, false);
+});

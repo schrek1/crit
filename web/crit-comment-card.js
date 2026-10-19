@@ -50,9 +50,29 @@
   // Repaint hooks of rendered chips, so a change in the agent's state (it came
   // back to the review) updates them without re-rendering the cards.
   var chipPainters = new Set();
+  // Rendered chips by comment id, so a status change repaints the chip
+  // instead of re-rendering the document around it.
+  var chipsByCommentId = new Map();
 
   function repaintAgentChips() {
     chipPainters.forEach(function (paint) { paint(); });
+  }
+
+  // applyAgentStatus puts a new agent status on the rendered chips of a
+  // comment. Returns false when the comment has no chip on the page, so the
+  // caller must re-render the card to show one.
+  function applyAgentStatus(commentId, status) {
+    var chips = chipsByCommentId.get(commentId);
+    if (!chips || !status) return false;
+    var applied = false;
+    chips.forEach(function (entry) {
+      if (entry.chip.isConnected === false) return;
+      entry.comment.agent_status = status;
+      entry.paint();
+      entry.armDeadline();
+      applied = true;
+    });
+    return applied;
   }
 
   // buildAgentStatusChip shows where a comment sent to the agent is. A chip
@@ -62,9 +82,15 @@
     var helpers = agentStatusHelpers();
     if (!helpers || !comment.agent_status) return null;
     var chip = document.createElement('span');
+    var entry = { chip: chip, comment: comment };
     function paint() {
       if (chip.isConnected === false && chip.dataset.painted) {
         chipPainters.delete(paint);
+        var chips = chipsByCommentId.get(comment.id);
+        if (chips) {
+          chips.delete(entry);
+          if (chips.size === 0) chipsByCommentId.delete(comment.id);
+        }
         return;
       }
       chip.dataset.painted = '1';
@@ -72,13 +98,20 @@
       chip.className = 'agent-status agent-status-' + state;
       chip.textContent = helpers.agentStateLabel(state);
     }
+    function armDeadline() {
+      var wait = helpers.agentStatusDeadlineMs(comment) - now();
+      if (wait > 0 && typeof setTimeout === 'function') {
+        var timer = setTimeout(paint, wait + 50);
+        if (timer && typeof timer.unref === 'function') timer.unref();
+      }
+    }
+    entry.paint = paint;
+    entry.armDeadline = armDeadline;
     paint();
     chipPainters.add(paint);
-    var wait = helpers.agentStatusDeadlineMs(comment) - now();
-    if (wait > 0 && typeof setTimeout === 'function') {
-      var timer = setTimeout(paint, wait + 50);
-      if (timer && typeof timer.unref === 'function') timer.unref();
-    }
+    if (!chipsByCommentId.has(comment.id)) chipsByCommentId.set(comment.id, new Set());
+    chipsByCommentId.get(comment.id).add(entry);
+    armDeadline();
     return chip;
   }
 
@@ -320,5 +353,6 @@
   return {
     buildCommentCard: buildCommentCard,
     repaintAgentChips: repaintAgentChips,
+    applyAgentStatus: applyAgentStatus,
   };
 });
