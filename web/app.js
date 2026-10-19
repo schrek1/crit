@@ -1909,7 +1909,71 @@
     section.appendChild(body);
     populateDocumentBody(body, file);
     highlightQuotesInSection(section, file);
+    observePierreDocumentResize(section);
     return section;
+  }
+
+  // Pierre keeps a rendered document in place by the first line of its empty
+  // file, which sits below the whole document. A thread growing inside the
+  // document (a reply, a resolve, an opened reply form) then scrolled the page
+  // by its growth. Instead, the block at the top of the screen stays where it
+  // is: it is remembered as the reader scrolls, and put back when the document
+  // changes height. Pierre's ResizeObserver was created first, so its own
+  // scroll fix has already run in the same frame when ours puts the block back.
+  let pierreReaderAnchor = null; // { section, selector, top }
+  let pierreDocumentResizeObserver = null;
+
+  function readerAnchorSelector(el) {
+    if (el.dataset.commentId) return '.comment-card[data-comment-id="' + CSS.escape(el.dataset.commentId) + '"]';
+    return '.line-block[data-start-line="' + el.dataset.startLine + '"][data-end-line="' + el.dataset.endLine + '"]';
+  }
+
+  // The document block or thread the top edge of the review pane cuts
+  // through, or null when no document starts above the screen (Pierre then
+  // anchors on the document itself, which is right). Blocks are in vertical
+  // order, so a binary search keeps this cheap on long documents.
+  function rememberPierreReaderAnchor() {
+    pierreReaderAnchor = null;
+    const scroller = document.getElementById('filesContainer');
+    if (!scroller) return;
+    const edge = scroller.getBoundingClientRect().top;
+    const sections = scroller.querySelectorAll('.pierre-document');
+    for (const section of sections) {
+      const rect = section.getBoundingClientRect();
+      if (rect.top >= edge || rect.bottom <= edge) continue;
+      const blocks = section.querySelectorAll('.line-block[data-start-line], .comment-card[data-comment-id]');
+      let low = 0;
+      let high = blocks.length - 1;
+      let found = null;
+      while (low <= high) {
+        const mid = (low + high) >> 1;
+        if (blocks[mid].getBoundingClientRect().bottom > edge) {
+          found = blocks[mid];
+          high = mid - 1;
+        } else {
+          low = mid + 1;
+        }
+      }
+      if (found) {
+        pierreReaderAnchor = { section: section, selector: readerAnchorSelector(found), top: found.getBoundingClientRect().top };
+      }
+      return;
+    }
+  }
+
+  function observePierreDocumentResize(section) {
+    if (!pierreDocumentResizeObserver) {
+      pierreDocumentResizeObserver = new ResizeObserver(function(entries) {
+        const anchor = pierreReaderAnchor;
+        if (!anchor || !entries.some(function(entry) { return entry.target === anchor.section; })) return;
+        const el = anchor.section.querySelector(anchor.selector);
+        const scroller = document.getElementById('filesContainer');
+        if (!el || !scroller) return;
+        const shift = el.getBoundingClientRect().top - anchor.top;
+        if (Math.abs(shift) >= 1) scroller.scrollTop += shift;
+      });
+    }
+    pierreDocumentResizeObserver.observe(section);
   }
 
   // Re-render a mounted document's contents in place. Swapping the
@@ -2165,6 +2229,7 @@
     let treeSyncQueued = false;
     pierreUnsubscribeTree = pierreView.viewer.subscribeToScroll(function() {
       critFind.rowsChanged();
+      rememberPierreReaderAnchor();
       if (treeSyncQueued) return;
       treeSyncQueued = true;
       requestAnimationFrame(function() { treeSyncQueued = false; syncTreeActiveFromPierre(); });
