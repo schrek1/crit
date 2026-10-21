@@ -1918,7 +1918,8 @@
   // document (a reply, a resolve, an opened reply form) then scrolled the page
   // by its growth. Instead, the block at the top of the screen stays where it
   // is: it is remembered as the reader scrolls, and put back when the document
-  // changes height. Pierre's ResizeObserver was created first, so its own
+  // changes height. Pierre's ResizeObserver was created first (each view
+  // creates its own, and disposePierreView drops ours with it), so its own
   // scroll fix has already run in the same frame when ours puts the block back.
   let pierreReaderAnchor = null; // { section, selector, top }
   let pierreDocumentResizeObserver = null;
@@ -1966,6 +1967,8 @@
       pierreDocumentResizeObserver = new ResizeObserver(function(entries) {
         const anchor = pierreReaderAnchor;
         if (!anchor || !entries.some(function(entry) { return entry.target === anchor.section; })) return;
+        // A removed section reports a zero rect; there is nothing to keep in place.
+        if (!anchor.section.isConnected) return;
         const el = anchor.section.querySelector(anchor.selector);
         const scroller = document.getElementById('filesContainer');
         if (!el || !scroller) return;
@@ -2797,6 +2800,10 @@
       container.parentNode.insertBefore(conversation, container);
     }
     if (pierreView) { pierreView.destroy(); pierreView = null; }
+    // The next view creates its own ResizeObserver. Ours must be created after
+    // it to run after Pierre's scroll fix, so drop it with the view.
+    if (pierreDocumentResizeObserver) { pierreDocumentResizeObserver.disconnect(); pierreDocumentResizeObserver = null; }
+    pierreReaderAnchor = null;
     document.body.classList.remove('pierre-review');
   }
 

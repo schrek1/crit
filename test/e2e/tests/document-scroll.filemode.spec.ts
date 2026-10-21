@@ -29,6 +29,34 @@ test.describe('Document view keeps the reader in place — File Mode', () => {
     // THEN - the thread stayed where it was in every frame, not only at the end
     expect(await largestMoveSinceTrackingStarted(card)).toBeLessThan(1);
   });
+
+  test('a reply still leaves the thread in place after the review view is rebuilt', async ({ page, request }) => {
+    // GIVEN - the review view was rebuilt (a palette change reloads it), then the reader scrolls to a thread
+    const mdPath = await getMdPath(request);
+    const comment = await addComment(request, mdPath, OPEN_QUESTION_LINE, 'Rate-limit by key or by IP?');
+    await loadPage(page);
+    const firstSection = await (await mdSection(page)).elementHandle();
+    await page.getByRole('button', { name: 'Settings', exact: true }).click();
+    const light = page.locator('#lightPaletteSelect');
+    await light.selectOption('catppuccin-latte');
+    await expect(light).toBeEnabled();
+    await page.keyboard.press('Escape');
+    await expect.poll(() => firstSection!.evaluate((el) => el.isConnected)).toBe(false);
+    const section = await mdSection(page);
+    const card = section.locator(`.comment-card[data-comment-id="${comment.id}"]`);
+    await card.evaluate((el) => el.scrollIntoView({ block: 'center' }));
+    await waitForScrollStable(page);
+    await expectDocumentStartsAboveScreen(section, reviewScroller(page));
+    await startTrackingScreenTop(card);
+
+    // WHEN - the agent replies to the thread
+    await addReply(request, mdPath, comment.id, 'By key, per tenant.');
+    await expect(card.locator('.comment-reply')).toHaveCount(1);
+    await waitForScrollStable(page);
+
+    // THEN - the thread stayed where it was in every frame
+    expect(await largestMoveSinceTrackingStarted(card)).toBeLessThan(1);
+  });
 });
 
 async function addReply(request: APIRequestContext, path: string, commentId: string, body: string) {
