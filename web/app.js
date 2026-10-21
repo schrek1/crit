@@ -5183,6 +5183,20 @@
     return window.confirm('Discard comment?');
   }
 
+  // Any open form with text: new or edited comment, reply, review comment.
+  function hasUnsavedCommentText() {
+    const formHasText = activeForms.some(function(formObj) {
+      const ta = formTextarea(formObj.formKey);
+      return (ta ? ta.value : (formObj.draftBody || '')).trim() !== '';
+    });
+    if (formHasText) return true;
+    for (const replyForm of activeReplyForms.values()) {
+      if (replyForm.text.trim()) return true;
+    }
+    const reviewTextarea = document.querySelector('#reviewConversation .comment-form textarea');
+    return !!reviewTextarea && reviewTextarea.value.trim() !== '';
+  }
+
   function confirmDiscardReviewCommentForm() {
     const ta = document.querySelector('#reviewConversation .comment-form textarea');
     const text = ta ? ta.value : '';
@@ -7636,6 +7650,8 @@
       '</div>');
     const nextBtn = el.querySelector('[data-next-round]');
     nextBtn.addEventListener('click', async function() {
+      // The new round closes every open form.
+      if (hasUnsavedCommentText() && !window.confirm('Discard unsaved comment and show changes?')) return;
       nextBtn.disabled = true;
       try {
         const res = await fetch('/api/round-complete', { method: 'POST' });
