@@ -1342,7 +1342,8 @@
   // A jump that centers a line (find, comment navigation) leaves another file
   // at the top of the list, and the scroll can keep settling after the
   // ignore window on a slow machine. Keep the target active while it is on
-  // screen; the pin holds for the first 2s while the list is still moving.
+  // screen. Scrolled off screen, the tree follows the scroll, but for the
+  // first 2s the pin stays in case the settling list brings the file back.
   let treePin = null; // { path, until }
   function pinTreeActive(path) {
     treePin = { path: path, until: Date.now() + 2000 };
@@ -2694,7 +2695,6 @@
   }
 
   function pinnedOnScreen(paths, viewer, top) {
-    if (Date.now() < treePin.until) return true;
     const i = paths.indexOf(treePin.path);
     if (i < 0) return false;
     const root = document.getElementById('filesContainer');
@@ -2714,7 +2714,7 @@
       updateTreeActive(treePin.path);
       return;
     }
-    treePin = null;
+    const pin = treePin && Date.now() < treePin.until ? treePin : null;
     // Above the first file sits the review conversation (the list header).
     const conversation = document.getElementById('reviewConversation');
     let best = conversation && !conversation.hidden && top + 60 < viewer.getTopForItem(paths[0])
@@ -2723,6 +2723,7 @@
       if (viewer.getTopForItem(paths[i]) <= top + 60) best = paths[i];
     }
     updateTreeActive(best);
+    treePin = pin; // updateTreeActive drops a pin for another file; keep it for 2s
   }
 
   function disposePierreView() {
