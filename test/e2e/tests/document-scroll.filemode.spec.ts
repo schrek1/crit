@@ -54,8 +54,10 @@ test.describe('Document view keeps the reader in place — File Mode', () => {
     await expect(card.locator('.comment-reply')).toHaveCount(1);
     await waitForScrollStable(page);
 
-    // THEN - the thread stayed where it was in every frame
-    expect(await largestMoveSinceTrackingStarted(card)).toBeLessThan(1);
+    // THEN - the thread stayed where it was in every frame. The palette change
+    // can leave the document on sub-pixel positions, and the fix skips shifts
+    // under 1px, so up to 1px can remain (the bug moves it by the reply height).
+    expect(await largestMoveSinceTrackingStarted(card)).toBeLessThan(2);
   });
 });
 
