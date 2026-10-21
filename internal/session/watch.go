@@ -430,6 +430,9 @@ func (s *Session) watchFileMtimes(stop <-chan struct{}) {
 					s.mu.Unlock()
 					continue
 				}
+				if f.roundStart == nil {
+					f.roundStart = &roundStartView{content: f.Content, hash: f.FileHash, previousContent: f.PreviousContent}
+				}
 				// Snapshot on first edit of a round (markdown files)
 				if f.FileType == "markdown" && s.pendingEdits == 0 {
 					f.PreviousContent = f.Content
@@ -819,6 +822,9 @@ func (s *Session) handleRoundCompleteFiles() {
 	sidecarPath := ReviewPathsFor(s.critJSONPath()).Snapshots
 	sf := SnapshotsFile{RoundSnapshots: CloneRoundSnapshots(s.RoundSnapshots)}
 	s.rereadFileContents(true)
+	for _, f := range s.Files {
+		f.roundStart = nil
+	}
 	prev := s.ReviewRound
 	s.ReviewRound++
 	rt := s.ReviewType
