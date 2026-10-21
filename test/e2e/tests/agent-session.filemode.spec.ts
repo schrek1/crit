@@ -1,7 +1,7 @@
 import { test, expect, type APIRequestContext, type Page } from '@playwright/test';
 import * as fs from 'fs';
 import * as path from 'path';
-import { addComment, clearAllComments, loadPage, roundComplete, sessionCwd } from './helpers';
+import { addComment, clearAllComments, loadPage, mdSection, openDocLineComment, roundComplete, sessionCwd } from './helpers';
 
 // ============================================================
 // Send to a waiting agent — File Mode (plan and document reviews).
@@ -164,5 +164,79 @@ test.describe('Files changed mid-round — File Mode', () => {
 
     await expect(page.locator('body')).toContainText(marker);
     await expect(page.locator('.toast-files-changed')).toHaveCount(0);
+  });
+
+  // A new round closes every open form, so text not yet saved would be lost.
+  test.describe('with a comment or reply being written', () => {
+    const DISCARD_QUESTION = 'Discard unsaved comment and show changes?';
+    const REPLY_TEXT = 'Half-written reply to shop-checkout';
+    const NEW_COMMENT_TEXT = 'Half-written comment on shop-cart';
+
+    test.beforeEach(async ({ request }) => {
+      await clearAllComments(request);
+      await addComment(request, 'plan.md', 1, 'Is the shop-checkout step still needed?');
+    });
+
+    test.afterEach(async ({ request }) => {
+      await clearAllComments(request);
+    });
+
+    test('Show changes asks first and Cancel keeps the reply and the bar', async ({ page }) => {
+      // GIVEN - a reply is being written and the agent changed the file
+      await loadPage(page);
+      const reply = await startWritingReply(page);
+      const marker = 'Kept reply round ' + Date.now();
+      fs.writeFileSync(planPath, `${originalPlan}\n\n${marker}\n`);
+      const toast = page.locator('.toast-files-changed');
+      await expect(toast).toBeVisible({ timeout: 10000 });
+
+      // WHEN - the reviewer clicks Show changes and cancels the question
+      const question = answerNextDialog(page, 'dismiss');
+      await toast.getByRole('button', { name: 'Show changes' }).click();
+
+      // THEN - the question was asked and nothing changed: same round, reply text and bar kept
+      expect(await question).toBe(DISCARD_QUESTION);
+      await expect(reply).toHaveValue(REPLY_TEXT);
+      await expect(toast).toBeVisible();
+      await expect(page.locator('body')).not.toContainText(marker);
+    });
+
+    test('Shift+R asks first and OK starts the next round without the new comment', async ({ page }) => {
+      // GIVEN - a new comment is being written and the agent changed the file
+      await loadPage(page);
+      const newComment = await openDocLineComment(page, await mdSection(page), 3);
+      await newComment.fill(NEW_COMMENT_TEXT);
+      await page.evaluate(() => (document.activeElement as HTMLElement | null)?.blur());
+      const marker = 'Discarded comment round ' + Date.now();
+      fs.writeFileSync(planPath, `${originalPlan}\n\n${marker}\n`);
+      const toast = page.locator('.toast-files-changed');
+      await expect(toast).toBeVisible({ timeout: 10000 });
+
+      // WHEN - the reviewer presses Shift+R and confirms the question
+      const question = answerNextDialog(page, 'accept');
+      await page.locator('body').press('Shift+R');
+
+      // THEN - the next round shows the changed file and the unsaved comment is gone
+      expect(await question).toBe(DISCARD_QUESTION);
+      await expect(page.locator('body')).toContainText(marker);
+      await expect(toast).toHaveCount(0);
+      await expect(page.locator('.comment-form textarea')).toHaveCount(0);
+    });
+
+    async function startWritingReply(page: Page) {
+      const card = page.locator('.comment-card').first();
+      await card.locator('.reply-input').click();
+      const reply = card.locator('.reply-textarea');
+      await reply.fill(REPLY_TEXT);
+      return reply;
+    }
+
+    // Resolves with the dialog's text; rejects with a "waiting for event dialog" timeout when none comes.
+    async function answerNextDialog(page: Page, answer: 'accept' | 'dismiss'): Promise<string> {
+      const dialog = await page.waitForEvent('dialog', { timeout: 5000 });
+      const message = dialog.message();
+      await (answer === 'accept' ? dialog.accept() : dialog.dismiss());
+      return message;
+    }
   });
 });
