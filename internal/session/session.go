@@ -247,6 +247,25 @@ type FileEntry struct {
 	// Generated: file is marked linguist-generated in the repo's top-level
 	// .gitattributes. The frontend renders these collapsed by default.
 	Generated bool `json:"-"`
+
+	// roundStart is the text the page keeps showing for the open round once
+	// the files-mode watcher has pulled a mid-round edit into Content; nil
+	// otherwise. Guarded by Session.mu.
+	roundStart *roundStartView
+}
+
+type roundStartView struct {
+	content, hash, previousContent string
+}
+
+// shownLocked returns the text the page shows in the open round, its hash, and
+// the previous-round text a files-mode markdown diff compares it with. Line
+// numbers coming from the page refer to this content. Caller holds Session.mu.
+func (f *FileEntry) shownLocked() (content, hash, previousContent string) {
+	if f.roundStart != nil {
+		return f.roundStart.content, f.roundStart.hash, f.roundStart.previousContent
+	}
+	return f.Content, f.FileHash, f.PreviousContent
 }
 
 // ShareFile represents a file payload for sharing.
@@ -1347,7 +1366,8 @@ func (s *Session) AddComment(filePath string, startLine, endLine int, side, body
 		}
 		anchor = extractAnchor(baseContent, startLine, endLine)
 	} else {
-		anchor = extractAnchor(f.Content, startLine, endLine)
+		shown, _, _ := f.shownLocked()
+		anchor = extractAnchor(shown, startLine, endLine)
 	}
 
 	now := time.Now().UTC().Format(time.RFC3339)
@@ -2422,6 +2442,7 @@ func (s *Session) ClearAllComments() {
 		f.Comments = []Comment{}
 		f.PreviousComments = nil
 		f.PreviousContent = ""
+		f.roundStart = nil
 		filtered = append(filtered, f)
 	}
 	s.Files = filtered
@@ -2959,12 +2980,13 @@ func (s *Session) GetFileSnapshot(path string) (map[string]any, bool) {
 
 	s.mu.RLock()
 	defer s.mu.RUnlock()
+	content, hash, _ := f.shownLocked()
 	return map[string]any{
 		"path":      f.Path,
 		"status":    f.Status,
 		"file_type": f.FileType,
-		"content":   f.Content,
-		"file_hash": f.FileHash,
+		"content":   content,
+		"file_hash": hash,
 	}, true
 }
 
@@ -3126,8 +3148,7 @@ func (s *Session) GetFileDiffSnapshot(path string, ignoreWhitespace bool) (map[s
 	}
 
 	// Markdown in files mode: snapshot content, then compute LCS diff outside the lock
-	prevContent := f.PreviousContent
-	currContent := f.Content
+	currContent, _, prevContent := f.shownLocked()
 	s.mu.RUnlock()
 
 	var hunks []vcs.DiffHunk
