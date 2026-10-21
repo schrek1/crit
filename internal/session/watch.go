@@ -433,12 +433,6 @@ func (s *Session) watchFileMtimes(stop <-chan struct{}) {
 				if f.roundStart == nil {
 					f.roundStart = &roundStartView{content: f.Content, hash: f.FileHash, previousContent: f.PreviousContent}
 				}
-				// Snapshot on first edit of a round (markdown files)
-				if f.FileType == "markdown" && s.pendingEdits == 0 {
-					f.PreviousContent = f.Content
-					f.PreviousComments = make([]Comment, len(f.Comments))
-					copy(f.PreviousComments, f.Comments)
-				}
 				f.Content = string(data)
 				f.FileHash = hash
 				s.mu.Unlock()
@@ -572,10 +566,9 @@ func (s *Session) carryForwardAllComments() {
 }
 
 // rereadFileContents re-reads all non-deleted files from disk and updates Content/FileHash.
-// If snapshotMarkdown is true, PreviousContent is set before overwriting (for files mode).
 // Must be called with s.mu held for writing.
 // No-op under FocusRange: content is pinned to the head SHA blob, not the working tree.
-func (s *Session) rereadFileContents(snapshotMarkdown bool) {
+func (s *Session) rereadFileContents() {
 	if s.Focus.Kind == FocusRange {
 		return
 	}
@@ -586,9 +579,6 @@ func (s *Session) rereadFileContents(snapshotMarkdown bool) {
 		data, err := os.ReadFile(f.AbsPath)
 		if err != nil {
 			continue
-		}
-		if snapshotMarkdown && f.FileType == "markdown" && f.PreviousContent == "" {
-			f.PreviousContent = f.Content
 		}
 		f.Content = string(data)
 		f.FileHash = fileHash(data)
@@ -636,7 +626,7 @@ func (s *Session) handleRoundCompleteGit() {
 			f.PreviousContent = f.Content
 		}
 	}
-	s.rereadFileContents(false)
+	s.rereadFileContents()
 	s.mu.Unlock()
 
 	// Run LCS-based carry-forward with anchor verification for all file types.
@@ -799,6 +789,19 @@ func (s *Session) handleRoundCompleteFiles() {
 	s.refreshFilesFromCLIDirs()
 
 	s.loadResolvedComments()
+
+	// The round's comments refer to the text the page showed; they land on
+	// the text on disk now, which the watcher may not have polled yet.
+	s.mu.Lock()
+	for _, f := range s.Files {
+		if f.FileType == "markdown" {
+			f.PreviousContent, _, _ = f.shownLocked()
+		}
+		f.roundStart = nil
+	}
+	s.rereadFileContents()
+	s.mu.Unlock()
+
 	s.carryForwardComments()
 
 	s.mu.Lock()
@@ -808,23 +811,14 @@ func (s *Session) handleRoundCompleteFiles() {
 	// Restore phantom entries for files that disappeared but have comments in the review file.
 	s.restoreOrphanedComments()
 
-	// Re-read all file contents and update hashes.
-	// (snapshot markdown PreviousContent in case watcher hasn't polled yet)
-	//
-	// Capture the round we are about to commit BEFORE rereadFileContents and
-	// BEFORE incrementing ReviewRound. On the first round-complete after boot,
-	// ReviewRound == 1 (R1 baseline already captured at construction), so this
-	// captures R2.
+	// Capture the round we are about to commit BEFORE incrementing ReviewRound.
+	// On the first round-complete after boot, ReviewRound == 1 (R1 baseline
+	// already captured at construction), so this captures R2.
 	s.mu.Lock()
 	nextRound := s.ReviewRound + 1
-	// INVARIANT: captureRoundSnapshot MUST run before rereadFileContents(true); reordering would snapshot the new on-disk content as the previous round and silently corrupt the timeline.
 	s.captureRoundSnapshot(nextRound)
 	sidecarPath := ReviewPathsFor(s.critJSONPath()).Snapshots
 	sf := SnapshotsFile{RoundSnapshots: CloneRoundSnapshots(s.RoundSnapshots)}
-	s.rereadFileContents(true)
-	for _, f := range s.Files {
-		f.roundStart = nil
-	}
 	prev := s.ReviewRound
 	s.ReviewRound++
 	rt := s.ReviewType

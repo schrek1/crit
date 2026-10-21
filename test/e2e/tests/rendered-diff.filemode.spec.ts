@@ -1,40 +1,7 @@
 import { test, expect, type APIRequestContext } from '@playwright/test';
 import * as fs from 'fs';
-import * as http from 'http';
 import * as path from 'path';
 import { clearAllComments, loadPage, mdSection, revealFile, diffLine, fileHeader, roundComplete, sessionCwd } from './helpers';
-
-/**
- * Subscribes to the session's SSE stream. `ready` resolves once connected,
- * `detected` on the next edit-detected event: the watcher has taken in an edit.
- * /api/file cannot show that, it keeps the round-start text until the next round.
- */
-function watchForEditDetected(baseURL: string) {
-  let onReady!: () => void;
-  const ready = new Promise<void>(resolve => { onReady = resolve; });
-  const detected = new Promise<void>((resolve, reject) => {
-    const req = http.get(new URL('/api/events', baseURL), res => {
-      onReady();
-      res.setEncoding('utf8');
-      res.on('data', (chunk: string) => {
-        if (chunk.includes('event: edit-detected')) {
-          clearTimeout(timer);
-          req.destroy();
-          resolve();
-        }
-      });
-    });
-    const timer = setTimeout(() => {
-      req.destroy();
-      reject(new Error('no edit-detected event within 10s'));
-    }, 10_000);
-    req.on('error', err => {
-      clearTimeout(timer);
-      reject(err);
-    });
-  });
-  return { ready, detected };
-}
 
 /**
  * Trigger a round-complete with a modified plan.md so that previousContent
@@ -287,7 +254,7 @@ test.describe('Rendered Diff — File Mode — Comments', () => {
 // Rendered Diff — File Mode — Word Diff on Paragraph Reflow
 // ============================================================
 test.describe('Rendered Diff — File Mode — Paragraph Reflow Word Diff', () => {
-  test('word-diff does not highlight common words shifted by line reflow', async ({ page, request, baseURL }) => {
+  test('word-diff does not highlight common words shifted by line reflow', async ({ page, request }) => {
     await clearAllComments(request);
     const original = fs.readFileSync(planPath, 'utf-8');
 
@@ -311,15 +278,11 @@ test.describe('Rendered Diff — File Mode — Paragraph Reflow Word Diff', () =
     fs.writeFileSync(planPath, v1Content);
     await roundComplete(request);
 
-    // Now write v2 content (SQS insertion + reflow) and trigger another round.
-    // The file watcher polls every 1s and must detect the edit before
-    // round-complete snapshots previousContent. Wait for its edit-detected
-    // event, then trigger round-complete once.
+    // Now write v2 content (SQS insertion + reflow) and trigger another round
+    // right away, as an agent does: round-complete reads the file itself,
+    // without waiting for the watcher's next poll.
     const v2Content = v1Content.replace(v1Para, v2Para);
-    const edit = watchForEditDetected(baseURL!);
-    await edit.ready;
     fs.writeFileSync(planPath, v2Content);
-    await edit.detected;
     await roundComplete(request);
     await expect(async () => {
       const diffRes = await request.get('/api/file/diff?path=plan.md');
