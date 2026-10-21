@@ -199,7 +199,7 @@ func TestLegacyBareHelpUsesRegistryRenderer(t *testing.T) {
 func TestCommandHelpDocumentsKeyOptions(t *testing.T) {
 	tests := map[string][]string{
 		"install": {"--force", "all"},
-		"comment": {"--reply-to", "--resolve", "--json", "--scope"},
+		"comment": {"--reply-to", "--resolve", "--json", "--scope", "--status", "--timeout"},
 		"plan":    {"[--name <slug>]"},
 		"story":   {"--no-open", "--pr", "--range", "--scope", "--vcs"},
 		"stop":    {"[file...]"},

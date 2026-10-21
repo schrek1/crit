@@ -624,8 +624,9 @@ STATE_FILE="$(e2e_state_file "$PORT")"
   echo "FAKE_HOME=$FAKE_HOME"
 } > "$STATE_FILE"
 
-# Configure agent_cmd for E2E testing (echo just prints stdin and exits)
-echo '{"agent_cmd": "echo"}' > "$FAKE_HOME/.crit.config.json"
+# Configure agent_cmd for E2E testing (echo just prints stdin and exits);
+# agent_instant_replies lets agent-session.spec.ts reach the waiting agent.
+echo '{"agent_cmd": "echo", "agent_instant_replies": true}' > "$FAKE_HOME/.crit.config.json"
 
 # Run crit in the fixture repo
 e2e_serve "$CRIT_BIN" _serve --no-open --port "$PORT"

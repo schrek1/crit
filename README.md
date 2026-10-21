@@ -316,6 +316,25 @@ After the first agent interaction, the comment becomes a **live thread**:
 >
 > You can also specify a model with `--model` (e.g. `claude --model sonnet -p`).
 
+#### Send to the agent that is already waiting
+
+**Beta, opt-in.** Turn it on in your global `~/.crit.config.json` with `"agent_instant_replies": true` (a project config cannot change it). Off, crit behaves as without the feature: Send now uses `agent_cmd` and comments show no agent status.
+
+When your agent runs the review loop (`crit` waiting for Finish Review), "Send now" goes to **that** agent instead of starting `agent_cmd` — no `agent_cmd` needed, and the agent answers with the context of the conversation the review came from.
+
+- The agent's `crit` returns at once with the comment: `approved: false` plus an `event: agent_request` line on stderr, and the [`on_agent_request`](docs/agent-prompts.md) prompt on stdout. It replies and runs `crit` again; the round does not end, so your open drafts stay.
+- If the agent is busy between two `crit` calls, the comment waits in a queue and its next `crit` returns at once. A Finish Review clicked meanwhile is kept the same way.
+- Replies in the thread go to the agent too (live thread). The waiting agent wins over `agent_cmd` when both are available.
+
+#### Agent status
+
+A comment sent to the agent shows where it is: **Queued**, **Delivered**, **Seen**, **Working**, **Replied**, or **Agent not responding** (no report or reply within 15 minutes). The agent reports *seen* and *working* itself:
+
+```bash
+crit comment --status seen c_a1b2c3
+crit comment --status working --timeout 45m c_a1b2c3   # each report resets the limit
+```
+
 ### Everything else
 
 - **Per-branch review isolation.** Each branch gets its own review file — switch branches freely without losing comments. Review data lives in `~/.crit/reviews/`, not your repo.
@@ -406,6 +425,7 @@ These keys can only be set in `~/.crit.config.json` (global). Project-level `.cr
 | Key                    | Type     | Default                    | Description                                                                                                                                                                             |
 | ---------------------- | -------- | -------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `agent_cmd`            | string   | `""`                       | Shell command for "Send to agent" (e.g. `"claude -p"`). See [Send to agent](#send-to-agent-experimental). |
+| `agent_instant_replies` | boolean  | `false`                    | Beta. Send now reaches the agent already waiting on the review, with per-comment agent status. See [Send to the agent that is already waiting](#send-to-the-agent-that-is-already-waiting). |
 | `open_cmd`             | string   | `""`                       | Custom command to open review URLs — receives the URL as its only argument (must be a single executable, no flags). Use when the browser isn't on the machine running crit, e.g. crit runs on a remote host over SSH and a small wrapper script opens the URL on your local machine. When unset, crit uses the platform default opener. |
 | `share_targets`        | array    | implicit crit.md when absent | Deployment list with per-target `name`, `url`, `default`, `proxy_auth`, nested `auth`, and public `share_consented`. An explicit empty array disables sharing. |
 | `auth_token`           | string   | `""`                       | Legacy singleton token; read only while `share_targets` is absent. |

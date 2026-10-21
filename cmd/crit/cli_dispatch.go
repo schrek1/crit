@@ -73,9 +73,11 @@ Options:
        crit comment [options] --selector <css> [--route <path>] <body>
        crit comment [options] --reply-to <id> [--resolve] <body>
        crit comment [options] --json [--file <path>]
+       crit comment [options] --status seen|working [--timeout <duration>] <id>...
        crit comment [options] --clear
 
-Add, reply to, bulk import, or clear review comments.
+Add, reply to, bulk import, or clear review comments, or report an agent's
+status on comments sent to it.
 Live reviews and HTML preview use --selector to pin a DOM element.
 
 Options:
@@ -90,7 +92,9 @@ Options:
       --route <path>     Page path for that pin
       --json             Read bulk comments as JSON
   -f, --file <path>      Read JSON from a file
-      --scope <mode>     Override comment focus scope`},
+      --scope <mode>     Override comment focus scope
+      --status <state>   Report seen or working on comments sent to the agent
+      --timeout <dur>    With --status: time before "agent not responding" (default 15m)`},
 	{name: "comments", handler: runComments, help: `Usage: crit comments [--session <id>] [--json] [--all] [review]
 
 List unresolved comments, with review-level comments first.`},

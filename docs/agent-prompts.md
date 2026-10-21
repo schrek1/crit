@@ -17,6 +17,7 @@ Prompt hooks are **templates** (Go `text/template`), not shell commands. They fe
 | `on_finish_approved` | Approve with zero unresolved comments (fallback) |
 | `on_finish_approved:files` / `:diff` / `:story` / `:live` / `:preview` | Mode-specific approve hooks |
 | `on_story_generate` | Before `crit story` builds the prompt sent to `agent_cmd` to author a story, and when `crit story --guide` resolves the guide to print |
+| `on_agent_request` | Comments are delivered mid-round to the agent waiting on the review (Send now, or a reply in a live thread). No `:mode` split. Variables: `{{.comments_json}}` (the delivered comments), `{{.comment_count}}`, `{{.next_round_cmd}}` |
 
 Resolution order for e.g. `on_finish_unresolved` in a PR review:
 
@@ -78,7 +79,7 @@ Explicit `prompts` config still wins over conventional files and is useful for n
 
 Config keys use `:` for mode suffixes; filenames use `.` instead (e.g. `on_finish_unresolved:diff` → `on_finish_unresolved.diff.md`).
 
-`agent_cmd`, `auth_token`, and `share_url` stay global-only; `prompts` is allowed in project config.
+`agent_cmd`, `agent_instant_replies`, `auth_token`, and `share_url` stay global-only; `prompts` is allowed in project config.
 
 ### Shipped templates
 
@@ -89,6 +90,7 @@ Config keys use `:` for mode suffixes; filenames use `.` instead (e.g. `on_finis
 | [`integrations/prompts/on_finish_unresolved.md`](../integrations/prompts/on_finish_unresolved.md) | Stock unresolved finish (count, embedded comments, actions, reconnect) |
 | [`integrations/prompts/on_finish_unresolved.story.md`](../integrations/prompts/on_finish_unresolved.story.md) | Stock story-mode unresolved finish with instructions to edit source files, not saved story JSON |
 | [`integrations/prompts/on_story_generate.md`](../integrations/prompts/on_story_generate.md) | Stock story authoring guide - the **entire** prompt sent to `agent_cmd` for `crit story`, principles + JSON shape included |
+| [`integrations/prompts/on_agent_request.md`](../integrations/prompts/on_agent_request.md) | Stock mid-round delivery to the waiting agent: the comments, status reports, reply command, and that the loop goes on |
 | [`integrations/prompts/examples/`](../integrations/prompts/examples/) | Optional playbooks (large-PR batching, AGENTS.md extraction, etc.) |
 
 Copy the defaults with `cd ~ && crit install prompts` (global) or `crit install prompts` from your repo root, wire them in `.crit.config.json` if you use non-standard paths, and customize from there.
@@ -136,6 +138,7 @@ Templates receive these variables (snake_case in templates):
 | `{{.comments_all_cmd}}` | All comments - `crit comments --json --all '…'` |
 | `{{.next_round_cmd}}` | Command to start the next round (`crit`, `crit --session …`, `crit plan …`). Empty when a plan hook started the round |
 | `{{.plan_hook}}` | Set when a plan hook is waiting on the review: `plan_mode` (agent exits plan mode again) or `codex` (agent ends its turn with the plan). Empty otherwise |
+| `{{.agent_instant_replies}}` | `true` when the global `agent_instant_replies` config key is on. The stock templates ask for `crit comment --status` reports only then |
 | `{{.session_key}}` | Daemon session key |
 | `{{.mode}}` | `files`, `diff`, `live`, or `preview` |
 | `{{.unresolved_count}}` | Open comments at finish time |

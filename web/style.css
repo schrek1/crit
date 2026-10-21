@@ -542,6 +542,50 @@ body {
 }
 .toast.error .toast-btn-filled:hover { filter: brightness(1.1); }
 .toast-actions { display: flex; gap: 6px; flex-shrink: 0; }
+.toast.toast-files-changed {
+  padding: 6px 8px 6px 14px;
+  background: color-mix(in srgb, var(--crit-live-fg) 12%, var(--crit-editor-bg));
+  border: 1px solid color-mix(in srgb, var(--crit-live-fg) 40%, transparent);
+  color: var(--crit-editor-fg);
+}
+.toast-files-changed .toast-btn-filled { background: var(--crit-live-fg); }
+.toast-files-changed-text { display: flex; align-items: center; gap: 8px; }
+.toast-files-changed-info {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 16px;
+  height: 16px;
+  border-radius: 50%;
+  border: 1px solid currentColor;
+  font-size: 11px;
+  font-weight: 600;
+  font-style: italic;
+  opacity: 0.6;
+  cursor: help;
+}
+.toast-files-changed-info:hover, .toast-files-changed-info:focus-visible { opacity: 1; }
+.toast-files-changed-info { position: relative; }
+.toast-files-changed-info:hover::after, .toast-files-changed-info:focus-visible::after {
+  content: attr(data-hint);
+  position: absolute;
+  top: calc(100% + 10px);
+  left: -8px;
+  width: 340px;
+  padding: 8px 10px;
+  border-radius: 6px;
+  background: var(--crit-editor-bg);
+  border: 1px solid color-mix(in srgb, var(--crit-live-fg) 40%, transparent);
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.25);
+  color: var(--crit-editor-fg);
+  font-size: 12px;
+  font-style: normal;
+  font-weight: 400;
+  line-height: 1.45;
+  white-space: normal;
+  z-index: 1;
+}
+.toast-files-changed .toast-btn-filled:hover { filter: brightness(1.1); }
 
 .btn-success {
   color: var(--crit-green);
@@ -3059,6 +3103,12 @@ textarea.drag-active {
   outline: 2px solid var(--crit-brand);
   outline-offset: 2px;
 }
+.comments-panel-switch:has(input:disabled) {
+  cursor: not-allowed;
+}
+.comments-panel-switch input:disabled ~ .comments-panel-switch-track {
+  opacity: 0.4;
+}
 
 /* Hide-resolved: body-class-driven CSS rule (replaces imperative DOM walk). */
 body.hide-resolved .comment-block:not(.panel-comment-block):has(.resolved-card) {
@@ -5366,47 +5416,111 @@ html[data-theme="light"] .toggle-btn.active {
 /* Send now button */
 .btn-agent {
   background: transparent;
-  color: var(--crit-brand);
-  border: 1px solid var(--crit-brand);
+  color: var(--crit-live-fg);
+  border: 1px solid var(--crit-live-fg);
   display: inline-flex;
   align-items: center;
   gap: 4px;
 }
 .btn-agent:hover {
-  background: var(--crit-brand);
-  color: var(--crit-fg-on-brand);
+  background: var(--crit-live-badge-bg);
+  color: var(--crit-live-fg);
 }
+/* Bolt-only pill floated beside the message's first line (22px line box);
+   its label shows as a bubble to its left after a short hover (the message
+   body clips anything above it). */
+.thread-send-now {
+  position: relative;
+  float: right;
+  justify-content: center;
+  width: 28px;
+  height: 20px;
+  margin: 1px 0 0 12px;
+  padding: 0;
+  border-radius: 10px;
+}
+.thread-send-now svg { width: 11px; height: 11px; }
+.thread-send-now::after {
+  content: attr(data-hint);
+  position: absolute;
+  right: calc(100% + 8px);
+  top: 50%;
+  transform: translateY(-50%);
+  padding: 3px 8px;
+  border-radius: 5px;
+  background: var(--crit-editor-bg);
+  border: 1px solid color-mix(in srgb, var(--crit-live-fg) 40%, transparent);
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.2);
+  color: var(--crit-editor-fg);
+  font-size: 12px;
+  font-weight: 400;
+  white-space: nowrap;
+  pointer-events: none;
+  opacity: 0;
+  transition: opacity 0.15s;
+  z-index: 2;
+}
+.thread-send-now:hover::after { opacity: 1; transition-delay: 0.7s; }
+.thread-send-now:focus-visible::after { opacity: 1; }
 .btn-agent:disabled {
   opacity: 0.5;
   cursor: wait;
 }
 
-/* Live Thread — green ambient glow (the theme's green) */
+/* Live Thread — orange ambient glow, matching the live badge */
 .live-thread > .comment-card {
-  box-shadow: 0 0 0 1px color-mix(in srgb, var(--crit-green) 20%, transparent),
-              0 0 12px color-mix(in srgb, var(--crit-green) 6%, transparent);
+  box-shadow: 0 0 0 1px color-mix(in srgb, var(--crit-live-fg) 20%, transparent),
+              0 0 12px color-mix(in srgb, var(--crit-live-fg) 6%, transparent);
 }
 .live-thread.agent-pending > .comment-card {
   animation: agent-glow 2s ease-in-out infinite;
 }
 @keyframes agent-glow {
-  0%, 100% { box-shadow: 0 0 0 1px color-mix(in srgb, var(--crit-green) 20%, transparent),
-                          0 0 8px color-mix(in srgb, var(--crit-green) 5%, transparent); }
-  50% { box-shadow: 0 0 0 1px color-mix(in srgb, var(--crit-green) 35%, transparent),
-                    0 0 16px color-mix(in srgb, var(--crit-green) 12%, transparent); }
+  0%, 100% { box-shadow: 0 0 0 1px color-mix(in srgb, var(--crit-live-fg) 20%, transparent),
+                          0 0 8px color-mix(in srgb, var(--crit-live-fg) 5%, transparent); }
+  50% { box-shadow: 0 0 0 1px color-mix(in srgb, var(--crit-live-fg) 35%, transparent),
+                    0 0 16px color-mix(in srgb, var(--crit-live-fg) 12%, transparent); }
 }
 
 /* Live thread badge */
+/* Orange, not green: a live thread goes straight to the agent. */
 .live-thread-badge {
   font-size: 10px;
   font-weight: 600;
-  color: var(--crit-green);
+  color: var(--crit-live-fg);
   background: var(--crit-live-badge-bg);
   padding: 1px 6px;
   border-radius: 3px;
 }
 .live-thread-badge.pulsing {
   animation: badge-pulse 2s ease-in-out infinite;
+}
+
+/* Agent status chip — where a comment sent to the agent is */
+.agent-status {
+  font-size: 10px;
+  font-weight: 600;
+  padding: 1px 6px;
+  border-radius: 3px;
+  white-space: nowrap;
+  color: var(--crit-editor-fg-muted);
+  border: 1px solid var(--crit-border);
+}
+.agent-status-seen,
+.agent-status-working {
+  color: var(--crit-yellow);
+  border-color: var(--crit-yellow-border);
+}
+.agent-status-working {
+  animation: badge-pulse 2s ease-in-out infinite;
+}
+.agent-status-replied {
+  color: var(--crit-green);
+  border-color: var(--crit-green);
+}
+.agent-status-not_responding {
+  color: var(--crit-red);
+  border-color: var(--crit-red);
 }
 @keyframes badge-pulse {
   0%, 100% { opacity: 0.7; }

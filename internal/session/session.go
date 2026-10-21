@@ -162,6 +162,10 @@ type Comment struct {
 	GitLabDiscussionID string  `json:"gitlab_discussion_id,omitempty"`
 	GitLabResolved     *bool   `json:"gitlab_resolved,omitempty"`
 
+	// AgentStatus is set once the comment is sent to an agent (Send now,
+	// the auto-send option, or Finish) and updated by the agent itself.
+	AgentStatus *AgentStatus `json:"agent_status,omitempty"`
+
 	// LastPushedBodyHash is a short stable digest of Body at the time of
 	// the most recent successful push (POST or PATCH) to GitHub. Used by
 	// `crit push` to detect locally-edited comments that need a PATCH.
@@ -243,6 +247,25 @@ type FileEntry struct {
 	// Generated: file is marked linguist-generated in the repo's top-level
 	// .gitattributes. The frontend renders these collapsed by default.
 	Generated bool `json:"-"`
+
+	// roundStart is the text the page keeps showing for the open round once
+	// the files-mode watcher has pulled a mid-round edit into Content; nil
+	// otherwise. Guarded by Session.mu.
+	roundStart *roundStartView
+}
+
+type roundStartView struct {
+	content, hash, previousContent string
+}
+
+// shownLocked returns the text the page shows in the open round, its hash, and
+// the previous-round text a files-mode markdown diff compares it with. Line
+// numbers coming from the page refer to this content. Caller holds Session.mu.
+func (f *FileEntry) shownLocked() (content, hash, previousContent string) {
+	if f.roundStart != nil {
+		return f.roundStart.content, f.roundStart.hash, f.roundStart.previousContent
+	}
+	return f.Content, f.FileHash, f.PreviousContent
 }
 
 // ShareFile represents a file payload for sharing.
@@ -477,6 +500,9 @@ type Session struct {
 	// yet written to disk. Keyed by file path -> set of comment IDs. buildCritJSON's
 	// applyDeletedCommentIDs drops them after merging with disk.
 	deletedCommentIDs map[string]map[string]struct{}
+	// deletedReplyIDs lists replies the reviewer deleted, so a daemon write
+	// does not take them back from a review file that still has them.
+	deletedReplyIDs map[string]struct{}
 
 	// pendingRemoteDeletes is the provider-neutral delete queue. A concurrent
 	// push may drain it on disk, so lastLoadedPendingDeletes prevents daemon
@@ -513,6 +539,8 @@ type Session struct {
 	waitingForAgent     bool      // true between finish (with unresolved comments) and round-complete
 	planHook            string    // plan_mode | codex while a plan hook waits on review-cycle
 	browserClients      int32     // number of connected SSE browser clients (atomic)
+
+	agent agentChannel
 
 	// Focus is the discriminator that selects what the session is showing.
 	// Defaults to FocusWorkingTree (today's behavior). Range-mode sessions
@@ -1313,7 +1341,8 @@ func (s *Session) AddComment(filePath string, startLine, endLine int, side, body
 		}
 		anchor = extractAnchor(baseContent, startLine, endLine)
 	} else {
-		anchor = extractAnchor(f.Content, startLine, endLine)
+		shown, _, _ := f.shownLocked()
+		anchor = extractAnchor(shown, startLine, endLine)
 	}
 
 	now := time.Now().UTC().Format(time.RFC3339)
@@ -1597,6 +1626,7 @@ func (s *Session) DeleteReviewCommentReply(commentID, replyID string) bool {
 				if r.ID == replyID {
 					s.reviewComments[i].Replies = append(s.reviewComments[i].Replies[:j], s.reviewComments[i].Replies[j+1:]...)
 					s.reviewComments[i].UpdatedAt = time.Now().UTC().Format(time.RFC3339)
+					s.markReplyDeletedLocked(replyID)
 					s.scheduleWrite()
 					return true
 				}
@@ -1872,6 +1902,7 @@ func (s *Session) DeleteReply(filePath, commentID, replyID string) bool {
 			}
 			f.Comments[i].Replies = append(f.Comments[i].Replies[:j], f.Comments[i].Replies[j+1:]...)
 			f.Comments[i].UpdatedAt = time.Now().UTC().Format(time.RFC3339)
+			s.markReplyDeletedLocked(replyID)
 			s.scheduleWrite()
 			return true
 		}
@@ -2369,6 +2400,7 @@ func (s *Session) ClearAllComments() {
 		f.Comments = []Comment{}
 		f.PreviousComments = nil
 		f.PreviousContent = ""
+		f.roundStart = nil
 		filtered = append(filtered, f)
 	}
 	s.Files = filtered
@@ -2384,6 +2416,7 @@ func (s *Session) ClearAllComments() {
 	s.lastRoundEdits = 0
 	critPath := s.critJSONPath()
 	s.mu.Unlock()
+	s.ResetAgentChannel()
 	// Full-folder cleanup; idempotent on missing folder.
 	if err := os.RemoveAll(critPath); err != nil && !os.IsNotExist(err) {
 		fmt.Fprintf(os.Stderr, "Warning: removing review folder: %v\n", err)
@@ -2905,12 +2938,13 @@ func (s *Session) GetFileSnapshot(path string) (map[string]any, bool) {
 
 	s.mu.RLock()
 	defer s.mu.RUnlock()
+	content, hash, _ := f.shownLocked()
 	return map[string]any{
 		"path":      f.Path,
 		"status":    f.Status,
 		"file_type": f.FileType,
-		"content":   f.Content,
-		"file_hash": f.FileHash,
+		"content":   content,
+		"file_hash": hash,
 	}, true
 }
 
@@ -3072,8 +3106,7 @@ func (s *Session) GetFileDiffSnapshot(path string, ignoreWhitespace bool) (map[s
 	}
 
 	// Markdown in files mode: snapshot content, then compute LCS diff outside the lock
-	prevContent := f.PreviousContent
-	currContent := f.Content
+	currContent, _, prevContent := f.shownLocked()
 	s.mu.RUnlock()
 
 	var hunks []vcs.DiffHunk

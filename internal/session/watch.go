@@ -430,11 +430,8 @@ func (s *Session) watchFileMtimes(stop <-chan struct{}) {
 					s.mu.Unlock()
 					continue
 				}
-				// Snapshot on first edit of a round (markdown files)
-				if f.FileType == "markdown" && s.pendingEdits == 0 {
-					f.PreviousContent = f.Content
-					f.PreviousComments = make([]Comment, len(f.Comments))
-					copy(f.PreviousComments, f.Comments)
+				if f.roundStart == nil {
+					f.roundStart = &roundStartView{content: f.Content, hash: f.FileHash, previousContent: f.PreviousContent}
 				}
 				f.Content = string(data)
 				f.FileHash = hash
@@ -492,6 +489,7 @@ func carryForwardComment(old Comment, now string) Comment {
 		ResolvedRound:      old.ResolvedRound,
 		CarriedForward:     true,
 		Live:               old.Live,
+		AgentStatus:        old.AgentStatus,
 		ReviewRound:        old.ReviewRound,
 		Replies:            old.Replies,
 		GitHubID:           old.GitHubID,
@@ -568,10 +566,9 @@ func (s *Session) carryForwardAllComments() {
 }
 
 // rereadFileContents re-reads all non-deleted files from disk and updates Content/FileHash.
-// If snapshotMarkdown is true, PreviousContent is set before overwriting (for files mode).
 // Must be called with s.mu held for writing.
 // No-op under FocusRange: content is pinned to the head SHA blob, not the working tree.
-func (s *Session) rereadFileContents(snapshotMarkdown bool) {
+func (s *Session) rereadFileContents() {
 	if s.Focus.Kind == FocusRange {
 		return
 	}
@@ -582,9 +579,6 @@ func (s *Session) rereadFileContents(snapshotMarkdown bool) {
 		data, err := os.ReadFile(f.AbsPath)
 		if err != nil {
 			continue
-		}
-		if snapshotMarkdown && f.FileType == "markdown" && f.PreviousContent == "" {
-			f.PreviousContent = f.Content
 		}
 		f.Content = string(data)
 		f.FileHash = fileHash(data)
@@ -632,7 +626,7 @@ func (s *Session) handleRoundCompleteGit() {
 			f.PreviousContent = f.Content
 		}
 	}
-	s.rereadFileContents(false)
+	s.rereadFileContents()
 	s.mu.Unlock()
 
 	// Run LCS-based carry-forward with anchor verification for all file types.
@@ -795,6 +789,19 @@ func (s *Session) handleRoundCompleteFiles() {
 	s.refreshFilesFromCLIDirs()
 
 	s.loadResolvedComments()
+
+	// The round's comments refer to the text the page showed; they land on
+	// the text on disk now, which the watcher may not have polled yet.
+	s.mu.Lock()
+	for _, f := range s.Files {
+		if f.FileType == "markdown" {
+			f.PreviousContent, _, _ = f.shownLocked()
+		}
+		f.roundStart = nil
+	}
+	s.rereadFileContents()
+	s.mu.Unlock()
+
 	s.carryForwardComments()
 
 	s.mu.Lock()
@@ -804,20 +811,14 @@ func (s *Session) handleRoundCompleteFiles() {
 	// Restore phantom entries for files that disappeared but have comments in the review file.
 	s.restoreOrphanedComments()
 
-	// Re-read all file contents and update hashes.
-	// (snapshot markdown PreviousContent in case watcher hasn't polled yet)
-	//
-	// Capture the round we are about to commit BEFORE rereadFileContents and
-	// BEFORE incrementing ReviewRound. On the first round-complete after boot,
-	// ReviewRound == 1 (R1 baseline already captured at construction), so this
-	// captures R2.
+	// Capture the round we are about to commit BEFORE incrementing ReviewRound.
+	// On the first round-complete after boot, ReviewRound == 1 (R1 baseline
+	// already captured at construction), so this captures R2.
 	s.mu.Lock()
 	nextRound := s.ReviewRound + 1
-	// INVARIANT: captureRoundSnapshot MUST run before rereadFileContents(true); reordering would snapshot the new on-disk content as the previous round and silently corrupt the timeline.
 	s.captureRoundSnapshot(nextRound)
 	sidecarPath := ReviewPathsFor(s.critJSONPath()).Snapshots
 	sf := SnapshotsFile{RoundSnapshots: CloneRoundSnapshots(s.RoundSnapshots)}
-	s.rereadFileContents(true)
 	prev := s.ReviewRound
 	s.ReviewRound++
 	rt := s.ReviewType
@@ -1127,6 +1128,26 @@ func remapLines(lineMap map[int]int, oldStart, oldEnd, maxLine int) (int, int) {
 	return s, e
 }
 
+// anchoredOldLines returns the comment's lines in prevLines, the content the
+// carry-forward maps from. A comment added while the agent was editing the file
+// mid-round holds line numbers of that edited version, so when its stored line
+// no longer holds the anchor, the anchor's position in prevLines is used.
+func anchoredOldLines(prevLines []string, c Comment) (start, end int) {
+	if c.Anchor == "" {
+		return c.StartLine, c.EndLine
+	}
+	anchorLen := len(strings.Split(c.Anchor, "\n"))
+	if c.StartLine >= 1 && c.StartLine+anchorLen-1 <= len(prevLines) &&
+		anchorSimilar(strings.Join(prevLines[c.StartLine-1:c.StartLine+anchorLen-1], "\n"), c.Anchor) {
+		return c.StartLine, c.EndLine
+	}
+	found := findAnchorInLines(prevLines, c.Anchor, c.StartLine)
+	if found == 0 {
+		return c.StartLine, c.EndLine
+	}
+	return found, found + c.EndLine - c.StartLine
+}
+
 // carryForwardComments maps comments from the previous round to new document
 // positions using LCS line mapping + anchor verification. Works for all file
 // types (markdown and code) that have PreviousContent and PreviousComments.
@@ -1168,6 +1189,7 @@ func (s *Session) carryForwardFileComments(f *FileEntry) {
 	entries := diff.ComputeLineDiff(prevContent, currContent)
 	lineMap := diff.MapOldLineToNew(entries)
 
+	prevLines := diff.SplitLines(prevContent)
 	newLines := diff.SplitLines(currContent)
 	newLineCount := len(newLines)
 	if newLineCount == 0 {
@@ -1210,7 +1232,8 @@ func (s *Session) carryForwardFileComments(f *FileEntry) {
 			f.Comments = append(f.Comments, carryForwardComment(c, now))
 			continue
 		}
-		newStart, newEnd := remapLines(lineMap, c.StartLine, c.EndLine, newLineCount)
+		oldStart, oldEnd := anchoredOldLines(prevLines, c)
+		newStart, newEnd := remapLines(lineMap, oldStart, oldEnd, newLineCount)
 		carried := carryForwardComment(c, now)
 		carried.StartLine = newStart
 		carried.EndLine = newEnd
