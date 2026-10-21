@@ -1043,6 +1043,105 @@ func TestCarryForward_AnchorFindsCorrectPositionWhenLCSWrong(t *testing.T) {
 	}
 }
 
+// A comment added mid-round can carry a line number from a version of the file
+// the agent edited after the round started, while carry-forward maps from the
+// round-start content.
+func TestCarryForward_CommentLineFromMidRoundVersion(t *testing.T) {
+	const (
+		lead       = "| Merchant sends the shop-exchange id in the acme API |"
+		webhook    = "| Webhook for an acme address entry carries the new fields too |"
+		dbRow      = "| DB: new columns plus CHECK exchange-or-name |"
+		withdrawal = "| Withdrawal is sent async without a signed-in merchant |"
+	)
+	header := []string{"# Shop plan", "", "| What | Where |", "|---|---|"}
+	doc := func(rows ...string) string {
+		return strings.Join(append(append([]string{}, header...), rows...), "\n") + "\n"
+	}
+	// Round start: lead 5, webhook 6, dbRow 7, withdrawal 8.
+	roundStart := doc(lead, webhook, dbRow, withdrawal)
+
+	// dbRow edited in place in an earlier round, plus an exact copy further down.
+	editedInPlace := doc(lead, webhook, strings.TrimSuffix(dbRow, " |")+" (reviewed) |", withdrawal, dbRow)
+
+	tests := []struct {
+		name       string
+		roundStart string
+		newContent string
+		startLine  int
+		wantLine   int
+		anchorKept bool
+	}{
+		{
+			name:       "line from the mid-round version, anchored row rewritten by the agent",
+			newContent: doc(lead, webhook, "| DB: only nullable columns, no CHECK constraint |", withdrawal),
+			startLine:  6, // dbRow while the agent had the lead row removed
+			wantLine:   7,
+		},
+		{
+			name:       "line from the mid-round version, anchored row moved again",
+			newContent: doc("| Refund goes back to the shop wallet |", lead, webhook, dbRow, withdrawal),
+			startLine:  6,
+			wantLine:   8,
+			anchorKept: true,
+		},
+		{
+			name:       "line from the round-start version follows the shift",
+			newContent: doc("| Refund goes back to the shop wallet |", lead, webhook, dbRow, withdrawal),
+			startLine:  7,
+			wantLine:   8,
+			anchorKept: true,
+		},
+		{
+			name:       "stored line still holding the edited anchor ignores an exact copy elsewhere",
+			roundStart: editedInPlace,
+			newContent: editedInPlace,
+			startLine:  7,
+			wantLine:   7,
+			anchorKept: true,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if tt.roundStart == "" {
+				tt.roundStart = roundStart
+			}
+			// GIVEN - a comment on the DB row, anchored to its text
+			s := &Session{
+				Mode: "files",
+				Files: []*FileEntry{{
+					Path:            "shop-plan.md",
+					Status:          "modified",
+					FileType:        "markdown",
+					Content:         tt.newContent,
+					PreviousContent: tt.roundStart,
+					Comments:        []Comment{},
+					PreviousComments: []Comment{{
+						ID:        "c_db",
+						StartLine: tt.startLine,
+						EndLine:   tt.startLine,
+						Body:      "Is a DB check right here?",
+						Anchor:    dbRow,
+						Scope:     "line",
+					}},
+				}},
+				roundComplete: make(chan struct{}, 1),
+			}
+
+			// WHEN - the round ends
+			s.carryForwardComments()
+
+			// THEN - the comment sits on the DB row of the new round
+			carried := s.Files[0].Comments[0]
+			if carried.StartLine != tt.wantLine || carried.EndLine != tt.wantLine {
+				t.Errorf("carried to lines %d-%d, want %d (the DB row)", carried.StartLine, carried.EndLine, tt.wantLine)
+			}
+			if tt.anchorKept && carried.Drifted {
+				t.Error("Drifted = true, want false: the anchored text is still there")
+			}
+		})
+	}
+}
+
 func TestCarryForward_WithoutAnchorBackwardsCompatible(t *testing.T) {
 	dir := t.TempDir()
 	mdPath := filepath.Join(dir, "plan.md")

@@ -1154,6 +1154,26 @@ func remapCommentPosition(c Comment, lineMap map[int]int, newLines []string, new
 	return start, end, drifted
 }
 
+// anchoredOldLines returns the comment's lines in prevLines, the content the
+// carry-forward maps from. A comment added while the agent was editing the file
+// mid-round holds line numbers of that edited version, so when its stored line
+// no longer holds the anchor, the anchor's position in prevLines is used.
+func anchoredOldLines(prevLines []string, c Comment) (start, end int) {
+	if c.Anchor == "" {
+		return c.StartLine, c.EndLine
+	}
+	anchorLen := len(strings.Split(c.Anchor, "\n"))
+	if c.StartLine >= 1 && c.StartLine+anchorLen-1 <= len(prevLines) &&
+		anchorSimilar(strings.Join(prevLines[c.StartLine-1:c.StartLine+anchorLen-1], "\n"), c.Anchor) {
+		return c.StartLine, c.EndLine
+	}
+	found := findAnchorInLines(prevLines, c.Anchor, c.StartLine)
+	if found == 0 {
+		return c.StartLine, c.EndLine
+	}
+	return found, found + c.EndLine - c.StartLine
+}
+
 // carryForwardComments maps comments from the previous round to new document
 // positions using LCS line mapping + anchor verification. Works for all file
 // types (markdown and code) that have PreviousContent and PreviousComments.
@@ -1195,6 +1215,7 @@ func (s *Session) carryForwardFileComments(f *FileEntry) {
 	entries := diff.ComputeLineDiff(prevContent, currContent)
 	lineMap := diff.MapOldLineToNew(entries)
 
+	prevLines := diff.SplitLines(prevContent)
 	newLines := diff.SplitLines(currContent)
 	newLineCount := len(newLines)
 	if newLineCount == 0 {
@@ -1237,8 +1258,10 @@ func (s *Session) carryForwardFileComments(f *FileEntry) {
 			f.Comments = append(f.Comments, carryForwardComment(c, now))
 			continue
 		}
+		anchored := c
+		anchored.StartLine, anchored.EndLine = anchoredOldLines(prevLines, c)
 		carried := carryForwardComment(c, now)
-		carried.StartLine, carried.EndLine, carried.Drifted = remapCommentPosition(c, lineMap, newLines, newLineCount)
+		carried.StartLine, carried.EndLine, carried.Drifted = remapCommentPosition(anchored, lineMap, newLines, newLineCount)
 		f.Comments = append(f.Comments, carried)
 	}
 	s.mu.Unlock()
