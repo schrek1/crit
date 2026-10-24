@@ -156,6 +156,13 @@ flowchart TD
   Auth -->|no| Reject[Reject]
 MMDFILE
 
+# Sequence diagram labels are SVG <text>, not HTML in a foreignObject.
+cat > seq.mmd << 'MMDFILE'
+sequenceDiagram
+  Client->>Server: Send request
+  Server-->>Client: Reply
+MMDFILE
+
 git add -A && git commit -q -m "initial commit"
 
 # Build crit binary outside the fixture dir (skip if CRIT_BIN is set)
@@ -169,4 +176,4 @@ e2e_export_fake_home "$DIR"
 
 # Run crit in file mode with explicit files AND a directory
 # --share-url enables the Share button so E2E tests can exercise the share payload
-e2e_serve "$CRIT_BIN" _serve --no-open --port "$PORT" --share-url "http://localhost:19999" plan.md main.go handler.ex flow.mmd lib/
+e2e_serve "$CRIT_BIN" _serve --no-open --port "$PORT" --share-url "http://localhost:19999" plan.md main.go handler.ex flow.mmd seq.mmd lib/

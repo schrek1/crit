@@ -965,36 +965,61 @@ func highestWebIndex(cj session.CritJSON) int {
 // with HeadSHA + DiffScope=layer so they pass visibleInFocus in range view.
 // See spec §E "Write path — `mergeWebComments`".
 func MergeWebComments(critPath string, newComments []WebComment, replyUpdates map[string][]WebReply) error {
+	return MergeWebCommentsFor(critPath, newComments, replyUpdates, session.ProbeDaemonFocus())
+}
+
+// MergeWebCommentsFor is MergeWebComments with the daemon focus already
+// known. The daemon passes its own focus rather than probing itself over HTTP.
+func MergeWebCommentsFor(critPath string, newComments []WebComment, replyUpdates map[string][]WebReply, daemonFocus *focus.Focus) error {
 	return updateReviewFile(critPath, func(cj *session.CritJSON) {
-		mergeWebCommentsInto(cj, newComments, replyUpdates)
+		mergeWebCommentsInto(cj, newComments, replyUpdates, daemonFocus)
 	})
 }
 
 // updateReviewFile loads the review file, applies mutate, stamps UpdatedAt,
-// and saves it.
+// and saves it, all under the review write lock. A missing review file is an
+// error. A missing review folder is returned before the lock would create it.
 func updateReviewFile(critPath string, mutate func(*session.CritJSON)) error {
-	data, err := session.ReadFileShared(session.ReviewPathsFor(critPath).Review)
-	if err != nil {
-		return err
-	}
-	var cj session.CritJSON
-	if err := json.Unmarshal(data, &cj); err != nil {
-		return err
-	}
-	if cj.Files == nil {
-		cj.Files = make(map[string]session.CritJSONFile)
-	}
-	mutate(&cj)
-	cj.UpdatedAt = time.Now().UTC().Format(time.RFC3339)
-	return session.SaveCritJSON(critPath, cj)
+	return updateReviewFileIf(critPath, func(cj *session.CritJSON) bool {
+		mutate(cj)
+		return true
+	})
 }
 
-func mergeWebCommentsInto(cj *session.CritJSON, newComments []WebComment, replyUpdates map[string][]WebReply) {
+// updateReviewFileIf is updateReviewFile, but saves only when mutate returns true.
+func updateReviewFileIf(critPath string, mutate func(*session.CritJSON) bool) error {
+	if _, err := os.Stat(session.ReviewPathsFor(critPath).Folder); err != nil {
+		return err
+	}
+	return session.WithReviewWriteLock(critPath, func() error {
+		data, err := session.ReadFileShared(session.ReviewPathsFor(critPath).Review)
+		if err != nil {
+			return err
+		}
+		var cj session.CritJSON
+		if err := json.Unmarshal(data, &cj); err != nil {
+			return err
+		}
+		if cj.Files == nil {
+			cj.Files = make(map[string]session.CritJSONFile)
+		}
+		if !mutate(&cj) {
+			return nil
+		}
+		cj.UpdatedAt = time.Now().UTC().Format(time.RFC3339)
+		return session.SaveCritJSON(critPath, cj)
+	})
+}
+
+// mergeWebCommentsInto adds pulled comments and replies to cj. daemonFocus
+// comes from session.ProbeDaemonFocus, called before the review lock because
+// it makes an HTTP call.
+func mergeWebCommentsInto(cj *session.CritJSON, newComments []WebComment, replyUpdates map[string][]WebReply, daemonFocus *focus.Focus) {
 	// Find the highest existing web-N index so new IDs are globally unique
 	// even if earlier ones were deleted from the review file.
 	webCount := highestWebIndex(*cj)
 
-	scope := focus.ResolvePullScope(cj)
+	scope := session.PullScopeFor(daemonFocus, cj)
 
 	now := time.Now().UTC().Format(time.RFC3339)
 	for _, wc := range newComments {
@@ -1002,6 +1027,7 @@ func mergeWebCommentsInto(cj *session.CritJSON, newComments []WebComment, replyU
 		var replies []session.Reply
 		for _, wr := range wc.Replies {
 			replies = append(replies, session.Reply{
+				ID:     session.RandomReplyID(),
 				Body:   wr.Body,
 				Author: wr.AuthorDisplayName,
 				UserID: wr.UserID,
@@ -1087,11 +1113,15 @@ func applyWebCommentPlacements(cj *session.CritJSON, placements map[string]sessi
 // mergeFetchedComments writes new comments, reply updates and placements
 // from one fetch in a single load and save of the review file.
 func mergeFetchedComments(critPath string, fetched fetchWebCommentsResult) error {
+	return mergeFetchedCommentsFor(critPath, fetched, session.ProbeDaemonFocus())
+}
+
+func mergeFetchedCommentsFor(critPath string, fetched fetchWebCommentsResult, daemonFocus *focus.Focus) error {
 	if !fetchHasUpdates(fetched) {
 		return nil
 	}
 	return updateReviewFile(critPath, func(cj *session.CritJSON) {
-		mergeWebCommentsInto(cj, fetched.NewComments, fetched.ReplyUpdates)
+		mergeWebCommentsInto(cj, fetched.NewComments, fetched.ReplyUpdates, daemonFocus)
 		applyWebCommentPlacements(cj, fetched.Placements)
 	})
 }
@@ -1111,6 +1141,7 @@ func mergeRepliesIntoComment(c session.Comment, webReplies []WebReply) session.C
 			continue
 		}
 		c.Replies = append(c.Replies, session.Reply{
+			ID:     session.RandomReplyID(),
 			Body:   wr.Body,
 			Author: wr.AuthorDisplayName,
 			UserID: wr.UserID,
@@ -1125,21 +1156,13 @@ func mergeRepliesIntoComment(c session.Comment, webReplies []WebReply) session.C
 // When the upsert skipped the PUT, crit-web still has the lines from the
 // share before, so the old record is kept.
 func updateShareState(critPath string, files []ShareFile, comments []ShareComment, reviewRound int, commentsSent bool) error {
-	data, err := session.ReadFileShared(session.ReviewPathsFor(critPath).Review)
-	if err != nil {
-		return err
-	}
-	var cj session.CritJSON
-	if err := json.Unmarshal(data, &cj); err != nil {
-		return err
-	}
-	cj.LastShareHash = computeShareHash(files, comments)
-	if commentsSent {
-		cj.SharedLines = sharedLines(comments)
-	}
-	cj.ReviewRound = reviewRound
-	cj.UpdatedAt = time.Now().UTC().Format(time.RFC3339)
-	return session.SaveCritJSON(critPath, cj)
+	return updateReviewFile(critPath, func(cj *session.CritJSON) {
+		cj.LastShareHash = computeShareHash(files, comments)
+		if commentsSent {
+			cj.SharedLines = sharedLines(comments)
+		}
+		cj.ReviewRound = reviewRound
+	})
 }
 
 // recordSharedLines writes only the shared comment lines, for shares whose
@@ -1152,20 +1175,13 @@ func recordSharedLines(critPath string, lines map[string]session.SharedLine) err
 }
 
 func bindShareBaseURL(critPath, baseURL string) error {
-	data, err := session.ReadFileShared(session.ReviewPathsFor(critPath).Review)
-	if err != nil {
-		return err
-	}
-	var cj session.CritJSON
-	if err := json.Unmarshal(data, &cj); err != nil {
-		return err
-	}
-	if cj.ShareBaseURL != "" {
-		return nil
-	}
-	cj.ShareBaseURL = baseURL
-	cj.UpdatedAt = time.Now().UTC().Format(time.RFC3339)
-	return session.SaveCritJSON(critPath, cj)
+	return updateReviewFileIf(critPath, func(cj *session.CritJSON) bool {
+		if cj.ShareBaseURL != "" {
+			return false
+		}
+		cj.ShareBaseURL = baseURL
+		return true
+	})
 }
 
 // persistShareState writes the share URL, delete token, and scope hash to the review file,
@@ -1174,47 +1190,58 @@ func persistShareState(critPath string, shareURL string, deleteToken string, sco
 	return persistShareStateForTarget(critPath, shareURL, "", deleteToken, scope, org, orgName, visibility)
 }
 
+// persistShareStateForTarget writes the share fields to the review file under
+// the review write lock. Unlike updateReviewFile it creates the file when it
+// is missing: the first `crit share` of plain files has no review file yet.
+// A file that does not read or parse is an error, so it is not overwritten.
 func persistShareStateForTarget(critPath string, shareURL string, shareBaseURL string, deleteToken string, scope string, org, orgName, visibility string) error {
-	var cj session.CritJSON
-	if data, err := session.ReadFileShared(session.ReviewPathsFor(critPath).Review); err == nil {
-		_ = json.Unmarshal(data, &cj)
-	}
-	if cj.Files == nil {
-		cj.Files = make(map[string]session.CritJSONFile)
-	}
-	cj.ShareURL = shareURL
-	cj.ShareBaseURL = shareBaseURL
-	cj.DeleteToken = deleteToken
-	cj.ShareScope = scope
-	cj.ShareOrg = org
-	cj.ShareOrgName = orgName
-	cj.ShareVisibility = visibility
-	cj.UpdatedAt = time.Now().UTC().Format(time.RFC3339)
-
-	return session.SaveCritJSON(critPath, cj)
+	return session.WithReviewWriteLock(critPath, func() error {
+		var cj session.CritJSON
+		data, err := session.ReadFileShared(session.ReviewPathsFor(critPath).Review)
+		switch {
+		case err == nil:
+			if err := json.Unmarshal(data, &cj); err != nil {
+				return fmt.Errorf("invalid review file: %w", err)
+			}
+		case !os.IsNotExist(err):
+			return err
+		}
+		if cj.Files == nil {
+			cj.Files = make(map[string]session.CritJSONFile)
+		}
+		cj.ShareURL = shareURL
+		cj.ShareBaseURL = shareBaseURL
+		cj.DeleteToken = deleteToken
+		cj.ShareScope = scope
+		cj.ShareOrg = org
+		cj.ShareOrgName = orgName
+		cj.ShareVisibility = visibility
+		cj.UpdatedAt = time.Now().UTC().Format(time.RFC3339)
+		return session.SaveCritJSON(critPath, cj)
+	})
 }
 
 // clearShareState removes share URL, delete token, share scope, and last-share
 // hash from the review file. It is the single source of truth for "undo share
 // metadata" — used by both the unpublish CLI path and tests.
 func clearShareState(critPath string) error {
-	data, err := session.ReadFileShared(session.ReviewPathsFor(critPath).Review)
-	if err != nil {
-		return nil //nolint:nilerr // no review file means nothing to clear
-	}
-	var cj session.CritJSON
-	if err := json.Unmarshal(data, &cj); err != nil {
+	err := updateReviewFile(critPath, func(cj *session.CritJSON) {
+		cj.ShareURL = ""
+		cj.ShareBaseURL = ""
+		cj.DeleteToken = ""
+		cj.ShareScope = ""
+		cj.LastShareHash = ""
+		cj.SharedLines = nil
+	})
+	var syntaxErr *json.SyntaxError
+	var typeErr *json.UnmarshalTypeError
+	switch {
+	case errors.As(err, &syntaxErr), errors.As(err, &typeErr):
 		return fmt.Errorf("invalid review file: %w", err)
+	case err != nil && os.IsNotExist(err):
+		return nil // no review file means nothing to clear
 	}
-	cj.ShareURL = ""
-	cj.ShareBaseURL = ""
-	cj.DeleteToken = ""
-	cj.ShareScope = ""
-	cj.LastShareHash = ""
-	cj.SharedLines = nil
-	cj.UpdatedAt = time.Now().UTC().Format(time.RFC3339)
-
-	return session.SaveCritJSON(critPath, cj)
+	return err
 }
 
 // checkProxyAuthCLIAllowed returns an error when proxy_auth is enabled in global
