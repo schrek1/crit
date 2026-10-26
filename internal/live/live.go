@@ -9,7 +9,6 @@ import (
 	"net/http"
 	"net/url"
 	"os"
-	"os/signal"
 	"regexp"
 	"strings"
 	"syscall"
@@ -66,7 +65,7 @@ var smokeClient = &http.Client{Timeout: 10 * time.Second}
 var (
 	startLiveDaemon                = daemon.StartDaemon
 	runLiveClient                  = daemon.RunReviewClient
-	installLiveDaemonSignalHandler = installDaemonSignalHandler
+	installLiveDaemonSignalHandler = daemon.StopOnSignal
 	openLiveBrowser                = browser.OpenBrowserWithCommand
 	launchLiveBrowser              = func(url, openCmd string) {
 		go openLiveBrowser(url, openCmd)
@@ -296,7 +295,7 @@ func RunLive(args []string) {
 		fmt.Fprintf(os.Stderr, "[crit] open %s/live\n", entry.BaseURL())
 	}
 
-	installLiveDaemonSignalHandler(entry)
+	installLiveDaemonSignalHandler(entry, syscall.SIGINT, syscall.SIGTERM)
 
 	runLiveClient(entry, key, quiet)
 }
@@ -316,14 +315,4 @@ func checkLiveSmoke(origin, cookies string) {
 	for _, n := range result.frameworkNotes {
 		fmt.Fprintf(os.Stderr, "[crit] note: %s\n", n)
 	}
-}
-
-func installDaemonSignalHandler(entry daemon.SessionEntry) {
-	sigCh := make(chan os.Signal, 1)
-	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
-	go func() {
-		<-sigCh
-		daemon.StopForSignal(entry)
-		os.Exit(0)
-	}()
 }

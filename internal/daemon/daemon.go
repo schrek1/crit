@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"os"
 	"os/exec"
+	"os/signal"
 	"path/filepath"
 	"sort"
 	"strconv"
@@ -1024,6 +1025,24 @@ func StopForSignal(s SessionEntry) {
 			_ = terminateProc(proc)
 		}
 	}
+}
+
+// Swapped in tests, so a test can deliver the signal and observe the exit.
+var (
+	notifySignals = signal.Notify
+	exitClient    = os.Exit
+)
+
+// StopOnSignal makes a client that started the daemon stop it (StopForSignal)
+// and exit when the client receives one of sigs.
+func StopOnSignal(s SessionEntry, sigs ...os.Signal) {
+	sigCh := make(chan os.Signal, 1)
+	notifySignals(sigCh, sigs...)
+	go func() {
+		<-sigCh
+		StopForSignal(s)
+		exitClient(0)
+	}()
 }
 
 // WaitForExit waits for the process to exit and kills it if it is still alive

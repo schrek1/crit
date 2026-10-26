@@ -753,6 +753,46 @@ func TestStopForSignal(t *testing.T) {
 	}
 }
 
+func TestStopOnSignal_StopsDaemonThenExits(t *testing.T) {
+	shutdownRequested := make(chan struct{}, 1)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/api/shutdown" {
+			shutdownRequested <- struct{}{}
+		}
+		json.NewEncoder(w).Encode(map[string]any{"status": "stopping"})
+	}))
+	defer srv.Close()
+	port, _ := strconv.Atoi(srv.URL[len("http://127.0.0.1:"):])
+
+	var sigCh chan<- os.Signal
+	var registered []os.Signal
+	exitCode := make(chan int, 1)
+	origNotify, origExit := notifySignals, exitClient
+	notifySignals = func(c chan<- os.Signal, sigs ...os.Signal) { sigCh, registered = c, sigs }
+	exitClient = func(code int) { exitCode <- code }
+	t.Cleanup(func() { notifySignals, exitClient = origNotify, origExit })
+
+	StopOnSignal(SessionEntry{PID: os.Getpid(), Port: port}, os.Interrupt)
+	if len(registered) != 1 || registered[0] != os.Interrupt {
+		t.Fatalf("registered signals = %v, want [%v]", registered, os.Interrupt)
+	}
+	sigCh <- os.Interrupt
+
+	select {
+	case <-shutdownRequested:
+	case <-time.After(5 * time.Second):
+		t.Fatal("daemon was not asked to shut down")
+	}
+	select {
+	case code := <-exitCode:
+		if code != 0 {
+			t.Errorf("exit code = %d, want 0", code)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("client did not exit")
+	}
+}
+
 func TestFindSessionForCWDBranch_MatchesByBranch(t *testing.T) {
 	home := t.TempDir()
 	testutil.SetHome(t, home)
