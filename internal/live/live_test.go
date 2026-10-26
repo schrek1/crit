@@ -587,7 +587,7 @@ func TestRunLive_ColdStartBrowserOwnership(t *testing.T) {
 				return false
 			}
 			signalHandlerInstalled := false
-			installLiveDaemonSignalHandler = func(int) {
+			installLiveDaemonSignalHandler = func(daemon.SessionEntry, ...os.Signal) {
 				signalHandlerInstalled = true
 			}
 			browserOpenCalls := 0
