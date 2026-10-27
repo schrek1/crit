@@ -1,16 +1,11 @@
 import { test, expect, type APIRequestContext } from '@playwright/test';
 import * as fs from 'fs';
 import * as path from 'path';
-import { addComment, clearAllComments, loadPage, revealFile, fileHeader, diffLine, openLineComment, roundComplete, sessionCwd } from './helpers';
+import { addComment, clearAllComments, loadPage, revealFile, fileHeader, diffLine, openLineComment, roundComplete, sessionCwd, writeSeenByWatcher } from './helpers';
 
 // Files mode: a markdown file can show its source even with no diff to show.
 
 const MD = 'plan.md';
-
-async function fileContent(request: APIRequestContext, filePath: string) {
-  const res = await request.get(`/api/file?path=${encodeURIComponent(filePath)}`);
-  return ((await res.json()) as { content: string }).content;
-}
 
 async function commentsOn(request: APIRequestContext, filePath: string) {
   const res = await request.get(`/api/file/comments?path=${encodeURIComponent(filePath)}`);
@@ -81,7 +76,7 @@ test.describe('Markdown Source view — files mode', () => {
     }
   });
 
-  test('Diff goes back to Document when a round leaves the file with no changes', async ({ page, request }) => {
+  test('Diff goes back to Document when a round leaves the file with no changes', async ({ page, request, baseURL }) => {
     const file = path.join(await sessionCwd(request), MD);
     const original = fs.readFileSync(file, 'utf8');
     const v2 = original.replace('# Migration Plan', '# Migration Plan v2');
@@ -95,10 +90,8 @@ test.describe('Markdown Source view — files mode', () => {
       await expect(toggle.locator('[data-mode="diff"]')).toHaveAttribute('aria-pressed', 'true');
 
       // Edit the file and put it back in the same round: the round ends with no hunks.
-      fs.writeFileSync(file, original.replace('# Migration Plan', '# Migration Plan v3'));
-      await expect.poll(async () => (await fileContent(request, MD)).startsWith('# Migration Plan v3')).toBe(true);
-      fs.writeFileSync(file, v2);
-      await expect.poll(async () => (await fileContent(request, MD)).startsWith('# Migration Plan v2')).toBe(true);
+      await writeSeenByWatcher(baseURL!, file, original.replace('# Migration Plan', '# Migration Plan v3'));
+      await writeSeenByWatcher(baseURL!, file, v2);
       await roundComplete(request);
 
       await expect(toggle.locator('.toggle-btn')).toHaveText(['Document', 'Source']);

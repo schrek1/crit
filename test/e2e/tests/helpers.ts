@@ -1,6 +1,7 @@
 import { test, expect, type Page, type APIRequestContext, type Locator } from '@playwright/test';
 import * as path from 'path';
 import * as fs from 'fs';
+import * as http from 'http';
 import { stateFilePath } from './state-file';
 
 // Return the on-disk review.json path for the running e2e daemon.
@@ -940,4 +941,38 @@ export async function expectSettledAt(page: Page, filePath: string): Promise<num
   }
   expect(Math.max(...tops) - Math.min(...tops), `header top samples ${tops.join(',')}`).toBeLessThanOrEqual(2);
   return tops;
+}
+
+/**
+ * Writes `content` to `filePath` and waits until the files-mode watcher has
+ * taken the edit in (its edit-detected event). /api/file cannot show that: it
+ * keeps the round-start text until the next round.
+ */
+export async function writeSeenByWatcher(baseURL: string, filePath: string, content: string) {
+  let onConnected!: () => void;
+  const connected = new Promise<void>(resolve => { onConnected = resolve; });
+  const detected = new Promise<void>((resolve, reject) => {
+    const req = http.get(new URL('/api/events', baseURL), res => {
+      onConnected();
+      res.setEncoding('utf8');
+      res.on('data', (chunk: string) => {
+        if (chunk.includes('event: edit-detected')) {
+          clearTimeout(timer);
+          req.destroy();
+          resolve();
+        }
+      });
+    });
+    const timer = setTimeout(() => {
+      req.destroy();
+      reject(new Error(`no edit-detected event within 10s after writing ${filePath}`));
+    }, 10_000);
+    req.on('error', err => {
+      clearTimeout(timer);
+      reject(err);
+    });
+  });
+  await connected;
+  fs.writeFileSync(filePath, content);
+  await detected;
 }
