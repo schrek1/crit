@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -70,6 +71,119 @@ func TestWatchFileMtimes_ClearAllCommentsPreservesNextRoundDiff(t *testing.T) {
 	if len(diff["hunks"].([]vcs.DiffHunk)) == 0 {
 		t.Fatal("next round lost its diff after cleanup")
 	}
+}
+
+// An agent answering a live comment edits the file mid-round. The page keeps
+// the round-start text until the next round, so what it reads from the
+// session, and the anchor of a comment made on it, must stay at round start.
+func TestWatchFileMtimes_MidRoundEditKeepsRoundStartText(t *testing.T) {
+	const (
+		lead       = "| Merchant sends the shop-exchange id in the acme API |"
+		webhook    = "| Webhook for an acme address entry carries the new fields too |"
+		dbRow      = "| DB: new columns plus CHECK exchange-or-name |"
+		withdrawal = "| Withdrawal is sent async without a signed-in merchant |"
+	)
+	doc := func(rows ...string) string {
+		return strings.Join(append([]string{"# Shop plan", "", "| What | Where |", "|---|---|"}, rows...), "\n") + "\n"
+	}
+	previousRound := doc(lead, webhook)
+	// Round start: lead 5, webhook 6, dbRow 7, withdrawal 8.
+	roundStart := doc(lead, webhook, dbRow, withdrawal)
+	// The agent drops the lead row: dbRow moves up to 6.
+	editedMidRound := doc(webhook, dbRow, withdrawal)
+
+	openRound := func(t *testing.T) (*Session, chan SSEEvent) {
+		t.Helper()
+		dir := t.TempDir()
+		mdPath := filepath.Join(dir, "shop-plan.md")
+		writeFile(t, mdPath, roundStart)
+		s := &Session{
+			Mode:         "files",
+			RepoRoot:     dir,
+			ReviewRound:  2,
+			pollInterval: testPollInterval,
+			Files: []*FileEntry{{
+				Path:            "shop-plan.md",
+				AbsPath:         mdPath,
+				Status:          "modified",
+				FileType:        "markdown",
+				Content:         roundStart,
+				FileHash:        fileHash([]byte(roundStart)),
+				PreviousContent: previousRound,
+				Comments:        []Comment{},
+			}},
+			subscribers:   make(map[chan SSEEvent]struct{}),
+			roundComplete: make(chan struct{}, 1),
+		}
+		t.Cleanup(func() { quiesceSession(t, s) })
+		events := s.Subscribe()
+		t.Cleanup(func() { s.Unsubscribe(events) })
+		startWatcher(t, s.watchFileMtimes)
+		return s, events
+	}
+	editMidRound := func(t *testing.T, s *Session, events chan SSEEvent) {
+		t.Helper()
+		writeFileNewMtime(t, s.Files[0].AbsPath, editedMidRound)
+		waitForSSE(t, events, "edit-detected")
+	}
+
+	t.Run("page reads of the file stay at round start", func(t *testing.T) {
+		// GIVEN - the page has loaded the file and its diff at round start
+		s, events := openRound(t)
+		fileAtRoundStart, _ := s.GetFileSnapshot("shop-plan.md")
+		diffAtRoundStart, _ := s.GetFileDiffSnapshot("shop-plan.md", false)
+
+		// WHEN - the agent edits the file mid-round and the page reloads
+		editMidRound(t, s, events)
+		fileAfterEdit, _ := s.GetFileSnapshot("shop-plan.md")
+		diffAfterEdit, _ := s.GetFileDiffSnapshot("shop-plan.md", false)
+
+		// THEN - the reloaded page gets the same text, hash and diff
+		if !reflect.DeepEqual(fileAfterEdit, fileAtRoundStart) {
+			t.Errorf("file after the mid-round edit = %v, want the round-start %v", fileAfterEdit, fileAtRoundStart)
+		}
+		if !reflect.DeepEqual(diffAfterEdit, diffAtRoundStart) {
+			t.Errorf("diff after the mid-round edit = %v, want the round-start %v", diffAfterEdit, diffAtRoundStart)
+		}
+	})
+
+	t.Run("a new comment is anchored to the round-start line", func(t *testing.T) {
+		// GIVEN - the agent has edited the file mid-round
+		s, events := openRound(t)
+		editMidRound(t, s, events)
+
+		// WHEN - the reviewer comments on the DB row the page shows at line 7
+		comment, _ := s.AddComment("shop-plan.md", 7, 7, "", "Is a DB check right here?", "", "reviewer", "")
+
+		// THEN - the anchor is the DB row, not what line 7 holds on disk
+		if comment.Anchor != dbRow {
+			t.Errorf("anchor = %q, want the DB row %q", comment.Anchor, dbRow)
+		}
+	})
+
+	t.Run("the next round shows the edited file with the comment on its row", func(t *testing.T) {
+		// GIVEN - a comment on the round-start DB row after a mid-round edit
+		s, events := openRound(t)
+		editMidRound(t, s, events)
+		s.AddComment("shop-plan.md", 7, 7, "", "Is a DB check right here?", "", "reviewer", "")
+		if err := s.SyncWriteFiles(); err != nil {
+			t.Fatal(err)
+		}
+
+		// WHEN - the reviewer starts the next round
+		s.SignalRoundComplete()
+		waitForSSE(t, events, "file-changed")
+
+		// THEN - the page gets the edited text and the comment sits on the DB row
+		file, _ := s.GetFileSnapshot("shop-plan.md")
+		if file["content"] != editedMidRound {
+			t.Errorf("next-round content = %q, want the edited file %q", file["content"], editedMidRound)
+		}
+		comments := s.GetComments("shop-plan.md")
+		if len(comments) != 1 || comments[0].StartLine != 6 || comments[0].Drifted {
+			t.Fatalf("next-round comments = %+v, want one on line 6 (the DB row), not drifted", comments)
+		}
+	})
 }
 
 // TestWatchFileMtimes_CommentNotLostOnFileChange verifies that a comment added
@@ -1040,6 +1154,105 @@ func TestCarryForward_AnchorFindsCorrectPositionWhenLCSWrong(t *testing.T) {
 	}
 	if carried.Drifted {
 		t.Error("expected Drifted=false since anchor was found")
+	}
+}
+
+// A comment added mid-round can carry a line number from a version of the file
+// the agent edited after the round started, while carry-forward maps from the
+// round-start content.
+func TestCarryForward_CommentLineFromMidRoundVersion(t *testing.T) {
+	const (
+		lead       = "| Merchant sends the shop-exchange id in the acme API |"
+		webhook    = "| Webhook for an acme address entry carries the new fields too |"
+		dbRow      = "| DB: new columns plus CHECK exchange-or-name |"
+		withdrawal = "| Withdrawal is sent async without a signed-in merchant |"
+	)
+	header := []string{"# Shop plan", "", "| What | Where |", "|---|---|"}
+	doc := func(rows ...string) string {
+		return strings.Join(append(append([]string{}, header...), rows...), "\n") + "\n"
+	}
+	// Round start: lead 5, webhook 6, dbRow 7, withdrawal 8.
+	roundStart := doc(lead, webhook, dbRow, withdrawal)
+
+	// dbRow edited in place in an earlier round, plus an exact copy further down.
+	editedInPlace := doc(lead, webhook, strings.TrimSuffix(dbRow, " |")+" (reviewed) |", withdrawal, dbRow)
+
+	tests := []struct {
+		name       string
+		roundStart string
+		newContent string
+		startLine  int
+		wantLine   int
+		anchorKept bool
+	}{
+		{
+			name:       "line from the mid-round version, anchored row rewritten by the agent",
+			newContent: doc(lead, webhook, "| DB: only nullable columns, no CHECK constraint |", withdrawal),
+			startLine:  6, // dbRow while the agent had the lead row removed
+			wantLine:   7,
+		},
+		{
+			name:       "line from the mid-round version, anchored row moved again",
+			newContent: doc("| Refund goes back to the shop wallet |", lead, webhook, dbRow, withdrawal),
+			startLine:  6,
+			wantLine:   8,
+			anchorKept: true,
+		},
+		{
+			name:       "line from the round-start version follows the shift",
+			newContent: doc("| Refund goes back to the shop wallet |", lead, webhook, dbRow, withdrawal),
+			startLine:  7,
+			wantLine:   8,
+			anchorKept: true,
+		},
+		{
+			name:       "stored line still holding the edited anchor ignores an exact copy elsewhere",
+			roundStart: editedInPlace,
+			newContent: editedInPlace,
+			startLine:  7,
+			wantLine:   7,
+			anchorKept: true,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if tt.roundStart == "" {
+				tt.roundStart = roundStart
+			}
+			// GIVEN - a comment on the DB row, anchored to its text
+			s := &Session{
+				Mode: "files",
+				Files: []*FileEntry{{
+					Path:            "shop-plan.md",
+					Status:          "modified",
+					FileType:        "markdown",
+					Content:         tt.newContent,
+					PreviousContent: tt.roundStart,
+					Comments:        []Comment{},
+					PreviousComments: []Comment{{
+						ID:        "c_db",
+						StartLine: tt.startLine,
+						EndLine:   tt.startLine,
+						Body:      "Is a DB check right here?",
+						Anchor:    dbRow,
+						Scope:     "line",
+					}},
+				}},
+				roundComplete: make(chan struct{}, 1),
+			}
+
+			// WHEN - the round ends
+			s.carryForwardComments()
+
+			// THEN - the comment sits on the DB row of the new round
+			carried := s.Files[0].Comments[0]
+			if carried.StartLine != tt.wantLine || carried.EndLine != tt.wantLine {
+				t.Errorf("carried to lines %d-%d, want %d (the DB row)", carried.StartLine, carried.EndLine, tt.wantLine)
+			}
+			if tt.anchorKept && carried.Drifted {
+				t.Error("Drifted = true, want false: the anchored text is still there")
+			}
+		})
 	}
 }
 

@@ -9,6 +9,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/tomasz-tomczyk/crit/internal/comment"
 	"github.com/tomasz-tomczyk/crit/internal/config"
 	"github.com/tomasz-tomczyk/crit/internal/hooks"
 	"github.com/tomasz-tomczyk/crit/internal/prompt"
@@ -41,6 +42,7 @@ func (s *Server) buildPromptContext(sess *Session, approved bool, stats map[stri
 		Approved:            approved,
 		InternalSessionMode: sess.Mode,
 		PlanHook:            sess.PlanHook(),
+		AgentInstantReplies: s.cfg.AgentInstantReplies,
 	}
 	if sess.Mode == "plan" && sess.PlanDir != "" {
 		ctx.PlanSlug = filepath.Base(sess.PlanDir)
@@ -109,6 +111,35 @@ func (s *Server) renderFinishPrompts(sess *Session, approved bool, stats map[str
 	ctx := s.buildPromptContext(sess, approved, stats)
 	result := prompt.RenderFinish(globalPrompts, projectPrompts, s.projectDir, s.homeDir, trust.UseProject, ctx)
 	return result.Prompt, result.Meta
+}
+
+// renderAgentRequestPrompt renders the on_agent_request prompt for comments
+// delivered to the waiting agent mid-round.
+func (s *Server) renderAgentRequestPrompt(sess *Session, comments []comment.ListedComment, nextCommand string) string {
+	globalPrompts, projectPrompts := config.LoadPromptMaps(s.projectDir)
+	_, projectHooks := config.LoadHookMaps(s.projectDir)
+	trust, err := prompt.EvaluateTrust(s.projectDir, projectPrompts, projectHooks)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Warning: evaluating project prompt trust: %v\n", err)
+	}
+	commentsJSON, _ := json.Marshal(comments)
+	planSlug := ""
+	if sess.Mode == "plan" && sess.PlanDir != "" {
+		planSlug = filepath.Base(sess.PlanDir)
+	}
+	data := map[string]any{
+		"comments_json":         string(commentsJSON),
+		"comment_count":         len(comments),
+		"next_round_cmd":        nextCommand,
+		"internal_session_mode": sess.Mode,
+		"plan_slug":             planSlug,
+	}
+	result, err := prompt.RenderHook(globalPrompts, projectPrompts, s.projectDir, s.homeDir, trust.UseProject, prompt.HookAgentRequest, data)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Warning: %v\n", err)
+		return string(commentsJSON)
+	}
+	return strings.TrimRight(result.Text, "\n")
 }
 
 func (s *Server) projectPromptsUntrusted() bool {

@@ -33,9 +33,13 @@
       { id: 'delete_comment', binding: 'd', action: 'Delete comment on focused block', modes: CODE_REVIEW_ONLY },
       { id: 'general_comment', binding: 'Shift+G', action: 'General comment', modes: CODE_REVIEW_ONLY },
       { binding: 'Ctrl+Enter', action: 'Comment', modes: BOTH, fixed: true },
+      { binding: 'Ctrl+Shift+Enter', action: 'Comment and send to the agent (Send now)', modes: CODE_REVIEW_ONLY, fixed: true },
     ]},
     { label: 'Review', shortcuts: [
       { id: 'finish_review', binding: 'Shift+F', action: 'Finish review', modes: BOTH },
+      { id: 'toggle_viewed', binding: 'a', action: 'Toggle viewed on focused file (or file under the mouse)', modes: CODE_REVIEW_ONLY },
+      { id: 'toggle_collapse', binding: 'o', action: 'Collapse or expand focused file (or file under the mouse)', modes: CODE_REVIEW_ONLY },
+      { id: 'show_changes', binding: 'Shift+R', action: 'Show files changed mid-round (new round)', modes: CODE_REVIEW_ONLY },
       { id: 'scope_all', binding: 'Shift+1', action: 'Switch to all changes', mode: 'vcs mode', modes: CODE_REVIEW_ONLY },
       { id: 'scope_branch', binding: 'Shift+2', action: 'Switch to branch changes', mode: 'vcs mode', modes: CODE_REVIEW_ONLY },
       { id: 'scope_staged', binding: 'Shift+3', action: 'Switch to staged changes', mode: 'vcs mode', modes: CODE_REVIEW_ONLY },

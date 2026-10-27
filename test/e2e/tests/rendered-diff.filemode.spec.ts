@@ -278,17 +278,11 @@ test.describe('Rendered Diff — File Mode — Paragraph Reflow Word Diff', () =
     fs.writeFileSync(planPath, v1Content);
     await roundComplete(request);
 
-    // Now write v2 content (SQS insertion + reflow) and trigger another round.
-    // The file watcher polls every 1s and must detect the edit before
-    // round-complete snapshots previousContent. Wait for the watcher to
-    // register the change by polling the file/diff endpoint for mtime changes,
-    // then trigger round-complete once.
+    // Now write v2 content (SQS insertion + reflow) and trigger another round
+    // right away, as an agent does: round-complete reads the file itself,
+    // without waiting for the watcher's next poll.
     const v2Content = v1Content.replace(v1Para, v2Para);
     fs.writeFileSync(planPath, v2Content);
-    await expect.poll(async () => {
-      const file = await (await request.get('/api/file?path=plan.md')).json();
-      return file.content as string;
-    }, { timeout: 5000 }).toContain('SQS');
     await roundComplete(request);
     await expect(async () => {
       const diffRes = await request.get('/api/file/diff?path=plan.md');

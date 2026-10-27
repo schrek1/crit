@@ -162,6 +162,10 @@ type Comment struct {
 	GitLabDiscussionID string  `json:"gitlab_discussion_id,omitempty"`
 	GitLabResolved     *bool   `json:"gitlab_resolved,omitempty"`
 
+	// AgentStatus is set once the comment is sent to an agent (Send now,
+	// the auto-send option, or Finish) and updated by the agent itself.
+	AgentStatus *AgentStatus `json:"agent_status,omitempty"`
+
 	// LastPushedBodyHash is a short stable digest of Body at the time of
 	// the most recent successful push (POST or PATCH) to GitHub. Used by
 	// `crit push` to detect locally-edited comments that need a PATCH.
@@ -243,6 +247,25 @@ type FileEntry struct {
 	// Generated: file is marked linguist-generated in the repo's top-level
 	// .gitattributes. The frontend renders these collapsed by default.
 	Generated bool `json:"-"`
+
+	// roundStart is the text the page keeps showing for the open round once
+	// the files-mode watcher has pulled a mid-round edit into Content; nil
+	// otherwise. Guarded by Session.mu.
+	roundStart *roundStartView
+}
+
+type roundStartView struct {
+	content, hash, previousContent string
+}
+
+// shownLocked returns the text the page shows in the open round, its hash, and
+// the previous-round text a files-mode markdown diff compares it with. Line
+// numbers coming from the page refer to this content. Caller holds Session.mu.
+func (f *FileEntry) shownLocked() (content, hash, previousContent string) {
+	if f.roundStart != nil {
+		return f.roundStart.content, f.roundStart.hash, f.roundStart.previousContent
+	}
+	return f.Content, f.FileHash, f.PreviousContent
 }
 
 // ShareFile represents a file payload for sharing.
@@ -459,6 +482,20 @@ type Session struct {
 	// ingested one). Read/write under s.mu; surfaced via GetSessionInfo.
 	story *Story
 
+	// roundCompletePending is true from SignalRoundComplete until the git
+	// watcher has carried comments forward. SyncWorkingTree must not touch
+	// content in that window. Read/write under s.mu.
+	roundCompletePending bool
+	// roundSignalSeq counts SignalRoundComplete calls, so a watcher run only
+	// clears roundCompletePending when no newer signal arrived meanwhile.
+	roundSignalSeq uint64
+
+	// Short-lived cache of the scope "all" file list (see liveAllChanges).
+	liveChangesMu     sync.Mutex
+	liveChanges       []vcs.FileChange
+	liveChangesKey    string
+	liveChangesExpiry time.Time
+
 	// RoundSnapshots is in-memory state populated from <folder>/snapshots.json
 	// at boot. Persisted via SaveSnapshotsFile; never written into review.json.
 	//
@@ -477,6 +514,15 @@ type Session struct {
 	// yet written to disk. Keyed by file path -> set of comment IDs. buildCritJSON's
 	// applyDeletedCommentIDs drops them after merging with disk.
 	deletedCommentIDs map[string]map[string]struct{}
+	// deletedReplyIDs lists replies the reviewer deleted, so a daemon write
+	// does not take them back from a review file that still has them.
+	deletedReplyIDs map[string]struct{}
+	// resolvedDirtyIDs lists comments whose resolved state the reviewer
+	// changed since the last write, each with the value of resolvedDirtySeq
+	// at the change. A write that takes in a CLI reply keeps the reviewer's
+	// resolved state for these instead of the one on disk.
+	resolvedDirtyIDs map[string]uint64
+	resolvedDirtySeq uint64
 
 	// pendingRemoteDeletes is the provider-neutral delete queue. A concurrent
 	// push may drain it on disk, so lastLoadedPendingDeletes prevents daemon
@@ -494,25 +540,32 @@ type Session struct {
 	// been deleted. time.Timer.Stop() does not wait for callbacks already
 	// executing, so the writeGen check alone is not sufficient to prevent a
 	// snapshot-taken-before-clear from resurrecting the file.
-	writeMu             sync.Mutex
-	pendingWrite        bool
-	sharedURL           string
-	shareBaseURL        string
-	deleteToken         string
-	shareScope          string
-	shareOrg            string
-	shareOrgName        string
-	shareVisibility     string
-	status              *Status
-	roundComplete       chan struct{}
-	pollInterval        time.Duration // watcher tick; 0 means 1s (tests shorten it)
-	pendingEdits        int
-	lastRoundEdits      int
-	lastCritJSONMtime   time.Time // mtime after our last WriteFiles(); used to detect external changes
-	awaitingFirstReview bool      // true until first review-cycle completes
-	waitingForAgent     bool      // true between finish (with unresolved comments) and round-complete
-	planHook            string    // plan_mode | codex while a plan hook waits on review-cycle
-	browserClients      int32     // number of connected SSE browser clients (atomic)
+	writeMu           sync.Mutex
+	pendingWrite      bool
+	sharedURL         string
+	shareBaseURL      string
+	deleteToken       string
+	shareScope        string
+	shareOrg          string
+	shareOrgName      string
+	shareVisibility   string
+	status            *Status
+	roundComplete     chan struct{}
+	pollInterval      time.Duration // watcher tick; 0 means 1s (tests shorten it)
+	pendingEdits      int
+	lastRoundEdits    int
+	lastCritJSONMtime time.Time // mtime after our last WriteFiles(); used to detect external changes
+	// diskHasUnloadedComments is set when our last write kept comments or
+	// replies that only disk had, so the watcher reloads despite the mtime match.
+	diskHasUnloadedComments bool
+	// writeSeq counts scheduled writes; see writeFilesSnapshot.writeSeq.
+	writeSeq            uint64
+	awaitingFirstReview bool   // true until first review-cycle completes
+	waitingForAgent     bool   // true between finish (with unresolved comments) and round-complete
+	planHook            string // plan_mode | codex while a plan hook waits on review-cycle
+	browserClients      int32  // number of connected SSE browser clients (atomic)
+
+	agent agentChannel
 
 	// Focus is the discriminator that selects what the session is showing.
 	// Defaults to FocusWorkingTree (today's behavior). Range-mode sessions
@@ -1313,7 +1366,8 @@ func (s *Session) AddComment(filePath string, startLine, endLine int, side, body
 		}
 		anchor = extractAnchor(baseContent, startLine, endLine)
 	} else {
-		anchor = extractAnchor(f.Content, startLine, endLine)
+		shown, _, _ := f.shownLocked()
+		anchor = extractAnchor(shown, startLine, endLine)
 	}
 
 	now := time.Now().UTC().Format(time.RFC3339)
@@ -1476,14 +1530,16 @@ func (s *Session) UpdateReviewComment(id, body string) (Comment, bool) {
 }
 
 // DeleteReviewComment deletes a review-level comment by ID. Review-level
-// comments are local-only (not synced to GitHub PR review comments), so a
-// straight removal is safe — there is no upstream record to tombstone.
+// comments are local-only (not synced to GitHub PR review comments), so there
+// is no upstream record to delete. The local tombstone stops the next write
+// from re-adding the comment from disk.
 func (s *Session) DeleteReviewComment(id string) bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	for i, c := range s.reviewComments {
 		if c.ID == id {
 			s.reviewComments = append(s.reviewComments[:i], s.reviewComments[i+1:]...)
+			s.trackDeletedComment(reviewCommentTombstones, id)
 			s.scheduleWrite()
 			return true
 		}
@@ -1506,6 +1562,7 @@ func (s *Session) ResolveReviewComment(id string, resolved bool) (Comment, bool)
 				s.reviewComments[i].ResolvedRound = 0
 			}
 			s.reviewComments[i].UpdatedAt = time.Now().UTC().Format(time.RFC3339)
+			s.markResolvedDirtyLocked(id)
 			s.scheduleWrite()
 			return s.reviewComments[i], true
 		}
@@ -1559,6 +1616,7 @@ func (s *Session) AddReviewCommentReply(commentID, body, author, userID string) 
 			s.reviewComments[i].Resolved = false
 			s.reviewComments[i].ResolvedRound = 0
 			s.reviewComments[i].UpdatedAt = now
+			s.markResolvedDirtyLocked(commentID)
 			s.scheduleWrite()
 			return r, true
 		}
@@ -1597,6 +1655,7 @@ func (s *Session) DeleteReviewCommentReply(commentID, replyID string) bool {
 				if r.ID == replyID {
 					s.reviewComments[i].Replies = append(s.reviewComments[i].Replies[:j], s.reviewComments[i].Replies[j+1:]...)
 					s.reviewComments[i].UpdatedAt = time.Now().UTC().Format(time.RFC3339)
+					s.markReplyDeletedLocked(replyID)
 					s.scheduleWrite()
 					return true
 				}
@@ -1680,6 +1739,7 @@ func (s *Session) SetCommentResolved(filePath, id string, resolved bool) (Commen
 		f.Comments[i].ResolvedRound = 0
 	}
 	f.Comments[i].UpdatedAt = time.Now().UTC().Format(time.RFC3339)
+	s.markResolvedDirtyLocked(id)
 	s.scheduleWrite()
 	return f.Comments[i], true
 }
@@ -1773,8 +1833,13 @@ func (s *Session) appendPendingRemoteDelete(ref RemoteRef) {
 	s.pendingRemoteDeletes = append(s.pendingRemoteDeletes, ref)
 }
 
-// trackDeletedComment records a file comment ID as deleted so the merge logic
-// does not re-add it from disk. Caller must hold s.mu.
+// reviewCommentTombstones is the deletedCommentIDs key for review-level
+// comments. It contains NUL, so it never collides with a file path.
+const reviewCommentTombstones = "\x00review"
+
+// trackDeletedComment records a comment ID as deleted so the merge logic does
+// not re-add it from disk. filePath is the comment's file, or
+// reviewCommentTombstones for a review-level comment. Caller must hold s.mu.
 func (s *Session) trackDeletedComment(filePath, id string) {
 	if s.deletedCommentIDs == nil {
 		s.deletedCommentIDs = make(map[string]map[string]struct{})
@@ -1830,6 +1895,7 @@ func (s *Session) AddReply(filePath, commentID, body, author, userID string) (Re
 	f.Comments[i].Resolved = false
 	f.Comments[i].ResolvedRound = 0
 	f.Comments[i].UpdatedAt = now
+	s.markResolvedDirtyLocked(commentID)
 	s.scheduleWrite()
 	return r, true
 }
@@ -1872,6 +1938,7 @@ func (s *Session) DeleteReply(filePath, commentID, replyID string) bool {
 			}
 			f.Comments[i].Replies = append(f.Comments[i].Replies[:j], f.Comments[i].Replies[j+1:]...)
 			f.Comments[i].UpdatedAt = time.Now().UTC().Format(time.RFC3339)
+			s.markReplyDeletedLocked(replyID)
 			s.scheduleWrite()
 			return true
 		}
@@ -2320,6 +2387,10 @@ func (s *Session) isWaitingForAgent() bool {
 // the review file. This prevents a TOCTOU race where GetSessionInfo could observe the
 // new round number before carry-forward is complete, returning empty comments.
 func (s *Session) SignalRoundComplete() {
+	// Wait for an in-flight write (SyncWorkingTree saves moved comment
+	// positions synchronously) so the watcher reloads what matches Content.
+	s.writeMu.Lock()
+	defer s.writeMu.Unlock()
 	s.mu.Lock()
 	if s.writeTimer != nil {
 		s.writeTimer.Stop()
@@ -2329,6 +2400,8 @@ func (s *Session) SignalRoundComplete() {
 	s.lastRoundEdits = s.pendingEdits
 	s.pendingEdits = 0
 	s.waitingForAgent = false
+	s.roundCompletePending = s.Mode == "git"
+	s.roundSignalSeq++
 	// Clear comments on all files.
 	// ReviewRound is incremented later by the watcher after carry-forward.
 	for _, f := range s.Files {
@@ -2349,7 +2422,7 @@ func (s *Session) ClearAllComments() {
 	// Hold writeMu for the duration so any in-flight debounced write must
 	// finish (and observe the new writeGen) before we proceed. Without this,
 	// a WriteFiles() call that passed the gen check a moment ago could
-	// atomicWriteFile the old snapshot back onto disk after os.Remove below.
+	// AtomicWriteFile the old snapshot back onto disk after os.Remove below.
 	s.writeMu.Lock()
 	defer s.writeMu.Unlock()
 	s.mu.Lock()
@@ -2369,6 +2442,7 @@ func (s *Session) ClearAllComments() {
 		f.Comments = []Comment{}
 		f.PreviousComments = nil
 		f.PreviousContent = ""
+		f.roundStart = nil
 		filtered = append(filtered, f)
 	}
 	s.Files = filtered
@@ -2384,8 +2458,9 @@ func (s *Session) ClearAllComments() {
 	s.lastRoundEdits = 0
 	critPath := s.critJSONPath()
 	s.mu.Unlock()
+	s.ResetAgentChannel()
 	// Full-folder cleanup; idempotent on missing folder.
-	if err := os.RemoveAll(critPath); err != nil && !os.IsNotExist(err) {
+	if err := ClearReviewFolder(critPath); err != nil {
 		fmt.Fprintf(os.Stderr, "Warning: removing review folder: %v\n", err)
 	}
 }
@@ -2905,12 +2980,13 @@ func (s *Session) GetFileSnapshot(path string) (map[string]any, bool) {
 
 	s.mu.RLock()
 	defer s.mu.RUnlock()
+	content, hash, _ := f.shownLocked()
 	return map[string]any{
 		"path":      f.Path,
 		"status":    f.Status,
 		"file_type": f.FileType,
-		"content":   f.Content,
-		"file_hash": f.FileHash,
+		"content":   content,
+		"file_hash": hash,
 	}, true
 }
 
@@ -3072,8 +3148,7 @@ func (s *Session) GetFileDiffSnapshot(path string, ignoreWhitespace bool) (map[s
 	}
 
 	// Markdown in files mode: snapshot content, then compute LCS diff outside the lock
-	prevContent := f.PreviousContent
-	currContent := f.Content
+	currContent, _, prevContent := f.shownLocked()
 	s.mu.RUnlock()
 
 	var hunks []vcs.DiffHunk
