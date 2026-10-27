@@ -1,4 +1,4 @@
-import { test, expect, type APIRequestContext } from '@playwright/test';
+import { test, expect } from '@playwright/test';
 import * as fs from 'fs';
 import * as path from 'path';
 import { clearAllComments, loadPage, mdSection, roundComplete, sessionCwd } from './helpers';
@@ -27,14 +27,11 @@ test.afterAll(async ({ request }) => {
   await roundComplete(request);
 });
 
-async function writePlan(request: APIRequestContext, inline: string) {
+// Round-complete reads the file itself, so a caller completes the round right
+// after writing, as an agent does.
+function writePlan(inline: string) {
   const content = originalPlan + '\n\n## Payload\n\n' + inline + '\n\n' + BLOCK + '\n\n' + LABEL + '\n';
   fs.writeFileSync(planPath, content);
-  // The file watcher must see the edit before round-complete snapshots it.
-  await expect.poll(async () => {
-    const file = await (await request.get('/api/file?path=plan.md')).json();
-    return file.content as string;
-  }, { timeout: 5000 }).toContain(inline);
 }
 
 // Neither the handler ran nor the author's names reached crit's CSS/JS.
@@ -59,7 +56,7 @@ test.describe('Document HTML — real render path', () => {
   });
 
   test('a document with handler, overlay class and fake data attributes stays inert', async ({ page, request }) => {
-    await writePlan(request, INLINE_V1);
+    writePlan(INLINE_V1);
     await roundComplete(request);
     await loadPage(page);
     const section = await mdSection(page);
@@ -77,10 +74,6 @@ test.describe('Document HTML — real render path', () => {
     const content = '[to id](#spot) and [to name](#mark)\n\n' + originalPlan +
       '\n\n<a id="spot">Spot target</a>\n\n' + 'filler\n\n'.repeat(40) + '<a name="mark">Mark target</a>\n';
     fs.writeFileSync(planPath, content);
-    await expect.poll(async () => {
-      const file = await (await request.get('/api/file?path=plan.md')).json();
-      return file.content as string;
-    }, { timeout: 5000 }).toContain('Mark target');
     await roundComplete(request);
 
     await loadPage(page);
@@ -98,9 +91,9 @@ test.describe('Document HTML — real render path', () => {
   });
 
   test('the word-diff path between rounds stays inert too', async ({ page, request }) => {
-    await writePlan(request, INLINE_V1);
+    writePlan(INLINE_V1);
     await roundComplete(request);
-    await writePlan(request, INLINE_V2);
+    writePlan(INLINE_V2);
     await roundComplete(request);
     await expect(async () => {
       const diff = await (await request.get('/api/file/diff?path=plan.md')).json();
