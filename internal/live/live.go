@@ -11,7 +11,6 @@ import (
 	"os"
 	"regexp"
 	"strings"
-	"syscall"
 	"time"
 
 	"github.com/tomasz-tomczyk/crit/internal/browser"
@@ -295,7 +294,7 @@ func RunLive(args []string) {
 		fmt.Fprintf(os.Stderr, "[crit] open %s/live\n", entry.BaseURL())
 	}
 
-	installLiveDaemonSignalHandler(entry, syscall.SIGINT, syscall.SIGTERM)
+	installLiveDaemonSignalHandler(entry, daemon.TerminationSignals()...)
 
 	runLiveClient(entry, key, quiet)
 }

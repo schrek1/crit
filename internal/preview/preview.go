@@ -7,7 +7,6 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"syscall"
 
 	"github.com/tomasz-tomczyk/crit/internal/browser"
 	"github.com/tomasz-tomczyk/crit/internal/clicmd"
@@ -128,7 +127,7 @@ func RunPreview(args []string) {
 		fmt.Fprintf(os.Stderr, "[crit] open %s/preview\n", entry.BaseURL())
 	}
 
-	daemon.StopOnSignal(entry, syscall.SIGINT, syscall.SIGTERM)
+	daemon.StopOnSignal(entry, daemon.TerminationSignals()...)
 
 	// Daemon owns the initial browser open (same as crit live after #768).
 	// Opening here too doubles the tab on cold start.
