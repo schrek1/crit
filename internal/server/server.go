@@ -1474,8 +1474,11 @@ func (s *Server) handleShareReshare(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	// Non-fatal if local hash/round persistence fails — remote upsert already succeeded.
-	_ = share.UpdateShareState(sess.CritJSONPath(), files, comments, result.ReviewRound, result.Sent)
-	sess.SyncCommentsFromDisk()
+	if _, err := sess.ApplyReviewFileUpdate(func() error {
+		return share.UpdateShareState(sess.CritJSONPath(), files, comments, result.ReviewRound, result.Sent)
+	}); err != nil {
+		log.Printf("Warning: saving share state after re-share: %v", err)
+	}
 
 	writeJSON(w, map[string]any{
 		"url":             result.URL,
@@ -1544,8 +1547,7 @@ func (s *Server) writeJSONError(w http.ResponseWriter, status int, msg string) {
 
 // pullAndMergeRemoteComments is the shared pull+merge used by /api/share/pull
 // and the first half of /api/share/reshare. Returns merged/replies_updated
-// counts. Caller must SyncCommentsFromDisk if they need a fresh in-memory view
-// after a successful merge (pull does; reshare does after upsert).
+// counts. A successful merge is already loaded into the session.
 func (s *Server) pullAndMergeRemoteComments() (merged, repliesUpdated int, err error) {
 	sess := s.session.Load()
 	hostedURL := sess.GetSharedURL()
@@ -1588,10 +1590,12 @@ func (s *Server) pullAndMergeRemoteComments() (merged, repliesUpdated int, err e
 		return 0, 0, nil
 	}
 	rekeyPulledPreviewComments(sess, fetched.NewComments)
-	if err := share.MergeFetchedComments(critPath, fetched); err != nil {
+	if _, err := sess.ApplyReviewFileUpdate(func() error {
+		_, _, daemonFocus := sess.PickerContext()
+		return share.MergeFetchedCommentsFor(critPath, fetched, &daemonFocus)
+	}); err != nil {
 		return 0, 0, err
 	}
-	sess.SyncCommentsFromDisk()
 	return len(fetched.NewComments), len(fetched.ReplyUpdates), nil
 }
 
@@ -1712,17 +1716,19 @@ func (s *Server) handleMergeComments(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, map[string]any{"merged": 0, "replies_updated": 0})
 		return
 	}
-	if err := mergeWebComments(critPath, newComments, replyUpdates); err != nil {
+	// mergeWebComments writes review.json outside WriteFiles. Run it between
+	// a flush and a reload so a debounced save cannot overwrite it, and so
+	// /api/file/comments and the UI see pulled comments without waiting for
+	// the 1s file watcher tick (which can also miss same-second mtime updates).
+	if _, err := sess.ApplyReviewFileUpdate(func() error {
+		_, _, daemonFocus := sess.PickerContext()
+		return share.MergeWebCommentsFor(critPath, newComments, replyUpdates, &daemonFocus)
+	}); err != nil {
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusInternalServerError)
 		json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
 		return
 	}
-	// mergeWebComments writes review.json outside WriteFiles; sync in-memory
-	// state immediately so /api/file/comments and the UI refresh path see
-	// pulled comments without waiting for the 1s file watcher tick (which can
-	// also miss same-second mtime updates).
-	sess.SyncCommentsFromDisk()
 	writeJSON(w, map[string]any{"merged": len(newComments), "replies_updated": len(replyUpdates)})
 }
 
@@ -3384,11 +3390,15 @@ func (s *Server) runAgentCmd(prompt string, commentID string, filePath string) {
 			return
 		default:
 		}
-		// Re-read content (and file list/diffs in git mode) so next fetch returns updated data
-		sess.RefreshFileContent()
+		// Re-read content (and file list/diffs in git mode) so next fetch returns
+		// updated data. Git mode leaves content alone: the browser still shows
+		// the text it loaded and comments anchor to it; the next live session
+		// fetch syncs content and moves comments together (SyncWorkingTree).
 		if sess.Mode == "git" {
 			sess.RefreshFileList()
 			sess.RefreshDiffs()
+		} else {
+			sess.RefreshFileContent()
 		}
 		sess.Notify(SSEEvent{Type: "comments-changed"})
 	}

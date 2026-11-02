@@ -97,3 +97,49 @@ func TestConcurrentShareLock(t *testing.T) {
 		t.Errorf("share.lock missing: %v", err)
 	}
 }
+
+// Hold the external writer after its read so a concurrent daemon save would
+// otherwise be overwritten by the external writer's older snapshot.
+func TestMergeWebCommentsPreservesConcurrentSessionSave(t *testing.T) {
+	root := t.TempDir()
+	dir := filepath.Join(root, ".crit")
+	seed := session.CritJSON{Files: map[string]session.CritJSONFile{}}
+	if err := session.SaveCritJSON(dir, seed); err != nil {
+		t.Fatal(err)
+	}
+	sess := &session.Session{RepoRoot: root, Files: []*session.FileEntry{{Path: "plan.md", Comments: []session.Comment{{ID: "local", Body: "local"}}}}}
+	read := make(chan struct{})
+	release := make(chan struct{})
+	merged := make(chan error, 1)
+	go func() {
+		merged <- updateReviewFile(dir, func(cj *session.CritJSON) {
+			close(read)
+			<-release
+			mergeWebCommentsInto(cj, []WebComment{{Body: "remote", FilePath: "plan.md"}}, nil, nil)
+		})
+	}()
+	<-read
+	saved := make(chan struct{})
+	go func() { sess.WriteFiles(); close(saved) }()
+	select {
+	case <-saved:
+	case <-time.After(100 * time.Millisecond):
+	}
+	close(release)
+	if err := <-merged; err != nil {
+		t.Fatal(err)
+	}
+	<-saved
+	data, err := session.ReadFileShared(session.ReviewPathsFor(dir).Review)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var got session.CritJSON
+	if err := json.Unmarshal(data, &got); err != nil {
+		t.Fatal(err)
+	}
+	comments := got.Files["plan.md"].Comments
+	if len(comments) != 2 {
+		t.Fatalf("lost concurrent comment: %+v", comments)
+	}
+}

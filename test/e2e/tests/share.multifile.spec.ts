@@ -28,6 +28,8 @@ test.describe('Share — Multi-File Mode', () => {
     // Click share — server will try to reach localhost:19999 which is down
     await shareBtn.click();
     await expect(page.locator('#toast-share')).toBeVisible();
+    // The error style applies (the toast-error class, not a transparent default).
+    await expect(page.locator('#toast-share')).not.toHaveCSS('background-color', 'rgba(0, 0, 0, 0)');
 
     // Button should revert to default state
     await expect(shareBtn).toHaveText('Share');
