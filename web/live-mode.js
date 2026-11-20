@@ -342,15 +342,6 @@
     els.resizer = document.getElementById('critLiveResizer');
     els.commentsPanel = document.getElementById('commentsPanel');
     els.panelBody = document.getElementById('commentsPanelBody');
-
-    // --- Share (preview mode only) ---
-    // Preview sessions publish a self-contained HTML snapshot, so the shared
-    // Share flow (window.crit.share) applies. Design/live sessions
-    // (review_type 'live') proxy a running app — there's nothing
-    // self-contained to publish — so the button stays hidden.
-    if (state.isPreview) {
-      installShareController();
-    }
   }
 
   // Share modal clipboard icons come from the canonical crit-icons.js module
@@ -398,45 +389,36 @@
     return el;
   }
 
-  function installShareController() {
+  function installShareController(cfg) {
     var shareBtnEl = document.getElementById('shareBtn');
     if (!shareBtnEl) return;
     if (!(window.crit && window.crit.share && window.crit.share.create)) return;
 
-    // Read share config from /api/config (the same endpoint code-review uses).
-    // Build + reveal the controller once config resolves. Until then the
-    // button stays hidden (its index.html default), so there's no flash.
-    fetch('/api/config')
-      .then(function (r) { return r.ok ? r.json() : {}; })
-      .then(function (cfg) {
-        cfg = cfg || {};
-        shareCtl = window.crit.share.create({
-          reviewType: 'preview',
-          canShare: true,
-          shareBtnEl: shareBtnEl,
-          shareURL: cfg.share_url || '',
-          shareTargets: Array.isArray(cfg.share_targets) ? cfg.share_targets : [],
-          shareBaseURL: cfg.share_base_url || '',
-          hostedURL: cfg.hosted_url || '',
-          deleteToken: cfg.delete_token || '',
-          hostedToken: cfg.hosted_token || '',
-          needsShareConsent: cfg.needs_consent || false,
-          authUserName: cfg.auth_user_name || '',
-          proxyAuth: !!cfg.proxy_auth,
-          sharedOrg: cfg.share_org
-            ? { slug: cfg.share_org, name: cfg.share_org_name || cfg.share_org }
-            : null,
-          sharedVisibility: cfg.share_org ? (cfg.share_visibility || '') : '',
-          onCommentsRefreshed: function () { refreshPanel(); return Promise.resolve(); },
-          toast: { show: shareToastShow, dismiss: shareToastDismiss },
-          escapeHtml: (shared && shared.escapeHTML) ? shared.escapeHTML : function (s) { return s == null ? '' : String(s); },
-          getSetting: (shared && shared.getSetting) ? shared.getSetting : function (_k, fb) { return fb; },
-          setSetting: (shared && shared.setSetting) ? shared.setSetting : function () {},
-          icons: { clipboard: SHARE_ICON_CLIPBOARD, check: SHARE_ICON_CHECK },
-        });
-        shareCtl.reveal();
-      })
-      .catch(function () { /* share is optional; leave button hidden */ });
+    shareCtl = window.crit.share.create({
+      reviewType: 'preview',
+      canShare: true,
+      shareBtnEl: shareBtnEl,
+      shareURL: cfg.share_url || '',
+      shareTargets: Array.isArray(cfg.share_targets) ? cfg.share_targets : [],
+      shareBaseURL: cfg.share_base_url || '',
+      hostedURL: cfg.hosted_url || '',
+      deleteToken: cfg.delete_token || '',
+      hostedToken: cfg.hosted_token || '',
+      needsShareConsent: cfg.needs_consent || false,
+      authUserName: cfg.auth_user_name || '',
+      proxyAuth: !!cfg.proxy_auth,
+      sharedOrg: cfg.share_org
+        ? { slug: cfg.share_org, name: cfg.share_org_name || cfg.share_org }
+        : null,
+      sharedVisibility: cfg.share_org ? (cfg.share_visibility || '') : '',
+      onCommentsRefreshed: function () { refreshPanel(); return Promise.resolve(); },
+      toast: { show: shareToastShow, dismiss: shareToastDismiss },
+      escapeHtml: (shared && shared.escapeHTML) ? shared.escapeHTML : function (s) { return s == null ? '' : String(s); },
+      getSetting: (shared && shared.getSetting) ? shared.getSetting : function (_k, fb) { return fb; },
+      setSetting: (shared && shared.setSetting) ? shared.setSetting : function () {},
+      icons: { clipboard: SHARE_ICON_CLIPBOARD, check: SHARE_ICON_CHECK },
+    });
+    shareCtl.reveal();
   }
 
   async function boot() {
@@ -479,6 +461,14 @@
       state.proxyOrigin = 'http://' + proxyHost + ':' + (s.proxy_port || 0);
     }
     buildShell();
+    state.promptChecks = shared.setupPromptChecks({}, function (cfg) {
+      shared.applyProjectPromptTrustUI(cfg, document.getElementById('finishBtn'));
+    });
+    state.promptChecks.refresh().then(function (cfg) {
+      state.config = cfg;
+      // Only preview sessions can share a self-contained snapshot.
+      if (state.isPreview) installShareController(cfg);
+    }).catch(function () { /* Config can be refreshed on Finish. */ });
     // Cache the iframeWindow once buildShell has inserted it.
     state.iframeWindow = els.iframe ? els.iframe.contentWindow : null;
 
@@ -498,11 +488,18 @@
     { key: 'fit',     label: 'Fit',     w: 0,    h: 0 },
   ];
 
+  // A previewed Excalidraw scene is a canvas page: it fills the pane (Fit)
+  // and leaves the saved viewport of other previews alone.
+  function isCanvasPreview() {
+    var files = state.isPreview && state.session && state.session.files;
+    return !!(files && files.length && /\.excalidraw(\.json)?$/i.test(files[0].path));
+  }
+
   function applyViewport(vp, opts) {
     state.viewport = { w: vp.w, h: vp.h, key: vp.key };
     // Persist viewport key in crit-settings cookie. Skip 'custom'
     // (drag-resize) so the next session restarts at the nearest preset.
-    if (vp.key && vp.key !== 'custom' && shared && shared.setSetting) {
+    if (vp.key && vp.key !== 'custom' && !isCanvasPreview() && shared && shared.setSetting) {
       try { shared.setSetting('live_viewport', vp.key); } catch (_) { /* noop */ }
     }
     var paneRect = els.pane.getBoundingClientRect();
@@ -557,7 +554,8 @@
       if (vp) applyViewport(vp);
     });
     // Hydrate persisted viewport (desktop default).
-    var savedKey = (shared && shared.getSetting) ? shared.getSetting('live_viewport', 'desktop') : 'desktop';
+    var savedKey = isCanvasPreview() ? 'fit'
+      : (shared && shared.getSetting) ? shared.getSetting('live_viewport', 'desktop') : 'desktop';
     var initial = VIEWPORTS.find(function (v) { return v.key === savedKey; })
       || VIEWPORTS.find(function (v) { return v.key === 'desktop'; });
     applyViewport(initial);
@@ -1039,6 +1037,7 @@
     // this wrapper supplies the live-mode dedup flag and uiState wiring.
     return await shared.runFinishReview({
       dedup: finishInFlight,
+      checkConsent: function () { return state.promptChecks.confirmTrust(); },
       onApproved: function () { setUIState('waiting'); },
       onWaiting: function () { setUIState('waiting'); },
       onError: function (err) {
@@ -1413,7 +1412,13 @@
     actions.appendChild(cancelBtn);
     replyEl.appendChild(actions);
 
-    function close() { refreshPanel(); }
+    // Restore the reply here: the panel keeps a card with an open editor, and
+    // an unchanged card is not rebuilt.
+    function close() {
+      actions.remove();
+      ta.replaceWith(bodyEl);
+      refreshPanel();
+    }
     cancelBtn.addEventListener('click', function (ev) { ev.stopPropagation(); close(); });
     saveBtn.addEventListener('click', async function (ev) {
       ev.stopPropagation();
@@ -1433,10 +1438,12 @@
         return;
       }
       // Optimistic local update — comment-changed SSE refreshes canonical state.
-      if (Array.isArray(c.replies)) {
-        for (var i = 0; i < c.replies.length; i++) {
-          if (c.replies[i] && c.replies[i].id === replyId) {
-            c.replies[i].body = newBody;
+      // Look the comment up again: a refresh during the edit replaces c.
+      var current = findCommentById(commentId) || c;
+      if (Array.isArray(current.replies)) {
+        for (var i = 0; i < current.replies.length; i++) {
+          if (current.replies[i] && current.replies[i].id === replyId) {
+            current.replies[i].body = newBody;
             break;
           }
         }
@@ -1810,11 +1817,12 @@
         var pending = 2;
         function done() { pending--; if (pending === 0) renderAllPanes(); }
         try {
-          fetch('/api/config').then(function (r) { return r.ok ? r.json() : {}; }).then(function (c) {
-            state.config = c || {};
+          // A failed fetch keeps what we already have rather than blanking it.
+          fetch('/api/config').then(function (r) { return r.ok ? r.json() : null; }).then(function (c) {
+            if (c) state.config = c;
           }).catch(function () {}).finally(done);
-          fetch('/api/session').then(function (r) { return r.ok ? r.json() : {}; }).then(function (s) {
-            state.session = s || {};
+          fetch('/api/session').then(function (r) { return r.ok ? r.json() : null; }).then(function (s) {
+            if (s) state.session = s;
           }).catch(function () {}).finally(done);
         } catch (_) {
           // best-effort

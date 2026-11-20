@@ -7,10 +7,24 @@ import { addComment, clearAllComments, loadPage, revealFile, fileHeader, diffLin
 // .mmd / .mermaid files and gives them a Diagram / Source toggle.
 
 const MMD = 'flow.mmd';
+const SEQ = 'seq.mmd';
+const EXCALIDRAW = 'flow.excalidraw';
 
 async function commentsOn(request: APIRequestContext, filePath: string) {
   const res = await request.get(`/api/file/comments?path=${encodeURIComponent(filePath)}`);
-  return (await res.json()) as { start_line: number; end_line: number; body: string }[];
+  return (await res.json()) as { start_line: number; end_line: number; body: string; quote?: string }[];
+}
+
+// The 1-based lines of a scene element's JSON object in the fixture: from the
+// "{" that opens it to the "}" that closes it (elements are indented 4).
+function elementLines(source: string, id: string): string {
+  const lines = source.split('\n');
+  const at = lines.findIndex(l => l.includes(`"id": "${id}"`));
+  let start = at;
+  while (lines[start].trim() !== '{') start--;
+  let end = at;
+  while (!/^ {4}},?$/.test(lines[end])) end++;
+  return `${start + 1}-${end + 1}`;
 }
 
 test.describe('Pluggable renderers — Mermaid files', () => {
@@ -60,6 +74,127 @@ test.describe('Pluggable renderers — Mermaid files', () => {
 
 });
 
+test.describe('Pluggable renderers — Excalidraw files', () => {
+  test.beforeEach(async ({ page, request }) => {
+    await clearAllComments(request);
+    await loadPage(page);
+  });
+
+  test('a .excalidraw file opens as a drawn scene with a Diagram / Source toggle', async ({ page }) => {
+    const item = await revealFile(page, EXCALIDRAW);
+    const target = item.locator('.crit-render[data-crit-renderer="excalidraw"][data-crit-kind="file"]');
+    await expect(target).toHaveAttribute('data-crit-state', 'rendered');
+    await expect(target.locator('.crit-render-output svg')).toBeVisible();
+    // One group per element; labels are SVG text.
+    await expect(target.locator('.crit-render-output g[data-excalidraw-index]')).toHaveCount(9);
+    await expect(target.locator('.crit-render-output svg text', { hasText: 'Orders DB' })).toHaveCount(1);
+
+    const toggle = fileHeader(page, EXCALIDRAW).locator('.file-header-toggle');
+    await expect(toggle.locator('.toggle-btn')).toHaveText(['Diagram', 'Source']);
+    await toggle.locator('[data-mode="document"]').click();
+    await expect(diffLine(item, 1)).toContainText('{');
+    await expect(item.locator('.crit-render')).toHaveCount(0);
+  });
+
+  test('clicking a label comments on its text element, quoting the label', async ({ page, request }) => {
+    const item = await revealFile(page, EXCALIDRAW);
+    const label = item.locator('.crit-render-output g[data-excalidraw-index]', { hasText: 'API gateway' });
+    await expect(label).toBeVisible();
+    await label.click();
+
+    const form = item.locator('.comment-form');
+    await expect(form).toBeVisible();
+    await form.locator('textarea').fill('Is this the public gateway or the internal one?');
+    await form.locator('.btn-primary').click();
+
+    await expect(item.locator('.comment-card .comment-body')).toContainText('public gateway');
+    const source = fs.readFileSync(path.join(await sessionCwd(request), EXCALIDRAW), 'utf8');
+    await expect.poll(async () => (await commentsOn(request, EXCALIDRAW)).map(c => `${c.start_line}-${c.end_line} ${c.quote}`))
+      .toEqual([`${elementLines(source, 'gw-label')} API gateway`]);
+  });
+
+  test('clicking an arrow comments on the arrow element', async ({ page, request }) => {
+    const item = await revealFile(page, EXCALIDRAW);
+    await item.locator('.crit-render-output g[data-excalidraw-index="2"]').click();
+    const form = item.locator('.comment-form');
+    await expect(form).toBeVisible();
+    await form.locator('textarea').fill('Sync or async call?');
+    await form.locator('.btn-primary').click();
+
+    const source = fs.readFileSync(path.join(await sessionCwd(request), EXCALIDRAW), 'utf8');
+    await expect.poll(async () => (await commentsOn(request, EXCALIDRAW)).map(c => `${c.start_line}-${c.end_line}`))
+      .toEqual([elementLines(source, 'call')]);
+  });
+
+  test('rough.min.js and freehand.min.js load on demand, not with the page', async ({ page, request }) => {
+    const requested: string[] = [];
+    page.on('request', req => {
+      if (/(rough|freehand)\.min\.js/.test(req.url())) requested.push(new URL(req.url()).pathname);
+    });
+    await loadPage(page);
+    const item = await revealFile(page, EXCALIDRAW);
+    await expect(item.locator('.crit-render')).toHaveAttribute('data-crit-state', 'rendered');
+    expect(requested.sort()).toEqual(['/freehand.min.js', '/rough.min.js']);
+    const html = await (await request.get('/')).text();
+    expect(html).not.toContain("'rough.min.js'");
+    expect(html).not.toContain("'freehand.min.js'");
+  });
+
+  test('labels are drawn in Excalifont, loaded only for the characters used', async ({ page }) => {
+    const fonts: string[] = [];
+    page.on('response', res => {
+      if (res.url().includes('/fonts/excalidraw/')) fonts.push(`${new URL(res.url()).pathname} ${res.status()} ${res.headers()['content-type']}`);
+    });
+    await loadPage(page);
+    const item = await revealFile(page, EXCALIDRAW);
+    const label = item.locator('.crit-render-output svg text', { hasText: 'API gateway' });
+    await expect(label).toHaveAttribute('font-family', /^Excalifont,/);
+    await expect.poll(() => page.evaluate(() => document.fonts.check('20px Excalifont', 'API gateway'))).toBe(true);
+    // Latin text needs the Latin subset only.
+    expect(fonts).toEqual(['/fonts/excalidraw/Excalifont/Excalifont-Regular-a88b72a24fb54c9f94e3b5fdaa7481c9.woff2 200 font/woff2']);
+  });
+
+  test('a sticky note is drawn as paper with a shadow and its creation date', async ({ page }) => {
+    const item = await revealFile(page, EXCALIDRAW);
+    const note = item.locator('.crit-render-output g[data-excalidraw-index="6"]');
+    await expect(note.locator('path[fill="#ffdf6b"]')).toHaveCount(1);
+    await expect(note.locator('path[fill="#000"][fill-opacity]')).toHaveCount(1);
+    await expect(note.locator('text')).toHaveText(/^\d{1,2} [A-Z][a-z]{2}( \d{4})?$/);
+    // The label is its own text element, on the note.
+    await expect(item.locator('.crit-render-output g[data-excalidraw-index="7"] text')).toHaveText('Cache reads?');
+  });
+
+  test('cardinality arrowheads draw every part of the marker', async ({ page }) => {
+    const item = await revealFile(page, EXCALIDRAW);
+    const relation = item.locator('.crit-render-output g[data-excalidraw-index="8"]');
+    // stroke + one bar at the start + crow's foot (2 lines) and circle at the end
+    await expect(relation.locator(':scope > g')).toHaveCount(5);
+  });
+
+  test('the dark theme paints each color, as Excalidraw exports do', async ({ page }) => {
+    await page.evaluate(() => (window as unknown as { applyTheme: (t: string) => void }).applyTheme('dark'));
+    try {
+      const item = await revealFile(page, EXCALIDRAW);
+      const target = item.locator('.crit-render[data-crit-renderer="excalidraw"]');
+      await expect(target).toHaveAttribute('data-crit-theme', /^dark/);
+      const svg = target.locator('.crit-render-output svg');
+      await expect(svg).toHaveCSS('filter', 'none');
+      // The white canvas is Excalidraw's dark gray, the dark ink light.
+      await expect(svg.locator(':scope > rect').first()).toHaveAttribute('fill', '#121212');
+      await expect(target.locator('svg text', { hasText: 'API gateway' })).toHaveAttribute('fill', '#d3d3d3');
+    } finally {
+      await page.evaluate(() => (window as unknown as { applyTheme: (t: string) => void }).applyTheme('system'));
+    }
+  });
+
+  test('a freedraw stroke is drawn as a filled outline', async ({ page }) => {
+    const item = await revealFile(page, EXCALIDRAW);
+    const stroke = item.locator('.crit-render-output g[data-excalidraw-index="5"] path[fill="#e03131"]');
+    await expect(stroke).toHaveCount(1);
+    await expect(stroke).toHaveAttribute('d', /^M [-\d.]+,[-\d.]+ Q .* Z$/);
+  });
+});
+
 test.describe('Pluggable renderers — seeded comments', () => {
   test('line comments show below the diagram', async ({ page, request }) => {
     await clearAllComments(request);
@@ -75,6 +210,57 @@ test.describe('Pluggable renderers — seeded comments', () => {
       const c = await card.boundingBox();
       return !!s && !!c && c.y >= s.y + s.height - 1;
     }, { message: 'comment card sits below the diagram' }).toBe(true);
+  });
+});
+
+test.describe('Pluggable renderers — quoted comments', () => {
+  test('a quote of diagram text is highlighted in the drawn diagram', async ({ page, request }) => {
+    await clearAllComments(request);
+    const res = await request.post(`/api/file/comments?path=${encodeURIComponent(MMD)}`, {
+      data: { start_line: 1, end_line: 4, body: 'Name this step', quote: 'Handle request' },
+    });
+    expect(res.ok()).toBeTruthy();
+    await loadPage(page);
+    const item = await revealFile(page, MMD);
+    await expect(item.locator('.crit-render-output svg')).toBeVisible();
+    // The highlight is on the label in the diagram, not in the hidden source.
+    await expect(item.locator('.crit-render-output mark.quote-highlight', { hasText: 'Handle request' })).toBeVisible();
+    await expect(item.locator('.crit-render-source mark.quote-highlight')).toHaveCount(0);
+
+    // Back from Source, the diagram comes from the render cache: one highlight, not two.
+    const toggle = fileHeader(page, MMD).locator('.file-header-toggle');
+    await toggle.locator('[data-mode="document"]').click();
+    await expect(item.locator('.crit-render')).toHaveCount(0);
+    await toggle.locator('[data-mode="rendered"]').click();
+    await expect(item.locator('.crit-render-output mark.quote-highlight', { hasText: 'Handle request' })).toBeVisible();
+    await expect(item.locator('.crit-render-output mark.quote-highlight')).toHaveCount(1);
+  });
+
+  test('a quote that also appears in the diagram CSS is highlighted on the label', async ({ page, request }) => {
+    await clearAllComments(request);
+    const res = await request.post(`/api/file/comments?path=${encodeURIComponent(MMD)}`, {
+      data: { start_line: 1, end_line: 4, body: 'Say why', quote: 'no' },
+    });
+    expect(res.ok()).toBeTruthy();
+    await loadPage(page);
+    const item = await revealFile(page, MMD);
+    await expect(item.locator('.crit-render-output mark.quote-highlight', { hasText: /^no$/ })).toBeVisible();
+    await expect(item.locator('.crit-render-output style .quote-highlight')).toHaveCount(0);
+  });
+
+  test('a quote of an SVG text label keeps the label drawn', async ({ page, request }) => {
+    await clearAllComments(request);
+    const res = await request.post(`/api/file/comments?path=${encodeURIComponent(SEQ)}`, {
+      data: { start_line: 1, end_line: 3, body: 'Which request?', quote: 'Send request' },
+    });
+    expect(res.ok()).toBeTruthy();
+    await loadPage(page);
+    const item = await revealFile(page, SEQ);
+    const mark = item.locator('.crit-render-output svg text tspan.quote-highlight', { hasText: 'Send request' });
+    await expect(mark).toHaveCount(1);
+    // An HTML <mark> in SVG <text> is not drawn: the label would have no width.
+    const width = await mark.evaluate(el => (el as SVGTextContentElement).getComputedTextLength());
+    expect(width).toBeGreaterThan(0);
   });
 });
 

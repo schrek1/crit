@@ -441,8 +441,11 @@ func authMiddleware(next http.HandlerFunc) http.HandlerFunc {
 
 ## Open Questions
 
-> Should we rate-limit by API key or by IP?
-> Leaning toward API key since we want per-tenant limits.
+> Dorothy followed her through many of the
+> beautiful rooms in her castle.
+>
+> The Witch bade her clean the pots and kettles
+> and sweep the floor and keep the fire fed with wood.
 
 ## Timeline
 
@@ -624,8 +627,9 @@ STATE_FILE="$(e2e_state_file "$PORT")"
   echo "FAKE_HOME=$FAKE_HOME"
 } > "$STATE_FILE"
 
-# Configure agent_cmd for E2E testing (echo just prints stdin and exits)
-echo '{"agent_cmd": "echo"}' > "$FAKE_HOME/.crit.config.json"
+# Configure agent_cmd for E2E testing (echo just prints stdin and exits);
+# agent_instant_replies lets agent-session.spec.ts reach the waiting agent.
+echo '{"agent_cmd": "echo", "agent_instant_replies": true}' > "$FAKE_HOME/.crit.config.json"
 
 # Run crit in the fixture repo
 e2e_serve "$CRIT_BIN" _serve --no-open --port "$PORT"

@@ -9,6 +9,8 @@ import (
 	"net/url"
 	"os"
 	"time"
+
+	"github.com/tomasz-tomczyk/crit/internal/prompt"
 )
 
 type daemonInitializationError struct {
@@ -22,7 +24,8 @@ func (e *daemonInitializationError) Error() string {
 // RunReviewClient connects to a running daemon, blocks until the user finishes
 // reviewing, prints feedback to stdout, and returns whether the review was approved.
 // When quiet is true, the optional session summary on stderr is omitted; the
-// approved line and finish prompt are always printed (agent contract).
+// approved line, the event line (live deliveries only) and the prompt are
+// always printed (agent contract).
 func RunReviewClient(entry SessionEntry, sessionKey string, quiet bool) (approved bool) {
 	client := &http.Client{Timeout: 24 * time.Hour}
 
@@ -35,6 +38,8 @@ func RunReviewClient(entry SessionEntry, sessionKey string, quiet bool) (approve
 		fmt.Fprintf(os.Stderr, "Error: %s\n", daemonInitError(body))
 		os.Exit(1)
 	}
+
+	printPromptProblems(body)
 
 	resp, err := client.Post(entry.ConnURL()+"/api/review-cycle", "application/json", nil)
 	if err != nil {
@@ -50,6 +55,7 @@ func RunReviewClient(entry SessionEntry, sessionKey string, quiet bool) (approve
 
 	var result struct {
 		Approved    bool   `json:"approved"`
+		Event       string `json:"event"`
 		Prompt      string `json:"prompt"`
 		NextCommand string `json:"next_command"`
 		Stats       *struct {
@@ -64,6 +70,11 @@ func RunReviewClient(entry SessionEntry, sessionKey string, quiet bool) (approve
 	}
 
 	fmt.Fprintf(os.Stderr, "approved: %v\n", result.Approved)
+	// Agents that know only the approved line still handle a live delivery:
+	// it is approved: false, so they reply and run crit again.
+	if result.Event != "" {
+		fmt.Fprintf(os.Stderr, "event: %s\n", result.Event)
+	}
 	if result.Prompt != "" {
 		fmt.Fprint(os.Stdout, result.Prompt)
 	}
@@ -94,6 +105,8 @@ func RunReviewClientRaw(entry SessionEntry, sessionKey, planHook string) (approv
 		fmt.Fprintf(os.Stderr, "crit plan-hook: %s\n", message)
 		return false, "crit daemon failed to initialize: " + message
 	}
+
+	printPromptProblems(body)
 
 	resp, err := client.Post(entry.ConnURL()+"/api/review-cycle?plan_hook="+url.QueryEscape(planHook), "application/json", nil)
 	if err != nil {
@@ -136,7 +149,7 @@ func waitForDaemonReady(client *http.Client, host string, port int, sessionKey, 
 	base := fmt.Sprintf("http://%s:%d", connHost, port)
 	deadline := time.Now().Add(5 * time.Minute)
 	for {
-		resp, reqErr := client.Get(base + "/api/session")
+		resp, reqErr := client.Get(base + "/api/session?check_prompts=1")
 		if reqErr != nil {
 			if sessionKey != "" {
 				if msg := ReadDaemonFailure(sessionKey, daemonGeneration); msg != "" {
@@ -157,6 +170,18 @@ func waitForDaemonReady(client *http.Client, host string, port int, sessionKey, 
 			return 0, nil, fmt.Errorf("daemon did not become ready within 5 minutes")
 		}
 		time.Sleep(readinessPollInterval)
+	}
+}
+
+func printPromptProblems(body []byte) {
+	var ready struct {
+		PromptProblems []prompt.Problem `json:"prompt_problems"`
+	}
+	if err := json.Unmarshal(body, &ready); err != nil {
+		return
+	}
+	for _, problem := range ready.PromptProblems {
+		fmt.Fprintf(os.Stderr, "Warning: finish prompt %s\n", problem)
 	}
 }
 

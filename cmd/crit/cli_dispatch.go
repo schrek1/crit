@@ -48,15 +48,18 @@ Options:
 	{name: "check", handler: func([]string) { runCheck() }, help: `Usage: crit check
 
 Check installed integrations for missing or stale configuration.`},
-	{name: "pr", handler: runPR, help: `Usage: crit pr <num|url>
+	{name: "pr", handler: runPR, help: `Usage: crit pr [num|url]
 
-Open a GitHub pull request for review.`},
-	{name: "mr", handler: runMR, help: `Usage: crit mr <iid|url>
+Open a GitHub pull request for review (default: the PR for the current branch).`},
+	{name: "mr", handler: runMR, help: `Usage: crit mr [iid|url]
 
-Open a GitLab merge request for review.`},
-	{name: "pull", handler: runPull, help: `Usage: crit pull [--session <id>] [--output <dir>] [number|url]
+Open a GitLab merge request for review (default: the MR for the current branch).`},
+	{name: "pull", handler: runPull, help: `Usage: crit pull [--session <id>] [--viewed] [--output <dir>] [number|url]
 
-Fetch PR/MR comments into the local review file.`},
+Fetch PR/MR comments into the local review file.
+
+Options:
+      --viewed           Also fetch files marked viewed on the PR (GitHub only)`},
 	{name: "push", handler: runPush, help: `Usage: crit push [options] [number|url]
 
 Post local comments as a PR/MR review.
@@ -64,6 +67,7 @@ Post local comments as a PR/MR review.
 Options:
       --session <id>     Target an active review session
       --dry-run          Preview without posting
+      --viewed           Also sync files marked viewed to the PR (GitHub only)
   -e, --event <type>     comment, approve, or request-changes
   -m, --message <text>   Review-level message
   -o, --output <dir>     Crit data root for reviews`},
@@ -73,9 +77,11 @@ Options:
        crit comment [options] --selector <css> [--route <path>] <body>
        crit comment [options] --reply-to <id> [--resolve] <body>
        crit comment [options] --json [--file <path>]
+       crit comment [options] --status seen|working [--timeout <duration>] <id>...
        crit comment [options] --clear
 
-Add, reply to, bulk import, or clear review comments.
+Add, reply to, bulk import, or clear review comments, or report an agent's
+status on comments sent to it.
 Live reviews and HTML preview use --selector to pin a DOM element.
 
 Options:
@@ -90,7 +96,9 @@ Options:
       --route <path>     Page path for that pin
       --json             Read bulk comments as JSON
   -f, --file <path>      Read JSON from a file
-      --scope <mode>     Override comment focus scope`},
+      --scope <mode>     Override comment focus scope
+      --status <state>   Report seen or working on comments sent to the agent
+      --timeout <dur>    With --status: time before "agent not responding" (default 15m)`},
 	{name: "comments", handler: runComments, help: `Usage: crit comments [--session <id>] [--json] [--all] [review]
 
 List unresolved comments, with review-level comments first.`},
@@ -121,9 +129,10 @@ Options:
       --share-url <url>    Share service URL
       --no-open            Do not open a browser
   -q, --quiet              On success, suppress connect/start status, tips, and session summary`},
-	{name: "preview", handler: runPreview, help: `Usage: crit preview [options] <file.html>
+	{name: "preview", handler: runPreview, help: `Usage: crit preview [options] <file.html|file.excalidraw>
 
-Review a local HTML file in preview mode.
+Review a local HTML file in preview mode. An Excalidraw scene opens as a
+canvas: hover an element to outline it, click it to comment on it.
 
 Options:
   -p, --port <port>       Port to listen on
@@ -312,7 +321,7 @@ Review:
   crit                                       Auto-detect changed files via git
   crit <file|dir> [...]                      Review specific files or directories
   crit live <url>                            Review a running web app in live mode
-  crit preview <file.html>                   Review a local HTML file in preview mode
+  crit preview <file.html|file.excalidraw>   Review an HTML file or Excalidraw canvas in preview mode
   crit --pr <num|url>                        Review a GitHub pull request
   crit --mr <iid|url>                        Review a GitLab merge request
   crit --range <base>..<head>                Review a commit range
@@ -334,8 +343,8 @@ Sharing:
   crit unpublish [file...]                   Remove a shared review from crit-web
 
 Remote review sync (provider auto-detected, or set "forge" in config):
-  crit pull [--session <id>] [number|url]    Fetch PR/MR comments into the review file
-  crit push [--session <id>] [--dry-run] [number|url]  Post review comments to a PR/MR
+  crit pull [--session <id>] [--viewed] [number|url]  Fetch PR/MR comments into the review file
+  crit push [--session <id>] [--dry-run] [--viewed] [number|url]  Post review comments to a PR/MR
 
 Setup & management:
   crit install <agent>                       Install integration for an AI coding tool

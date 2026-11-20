@@ -17,7 +17,8 @@ crit/
 │   ├── style.css / style-live.css / theme.css
 │   ├── __tests__/       # Node.js unit tests (node --test)
 │   ├── pierre/          # Vendored @pierre/diffs + Shiki (split ESM, gzip; scripts/build-pierre.mjs)
-│   └── *.min.js         # Vendored markdown-it, DOMPurify, mermaid, diff-match-patch
+│   ├── fonts/excalidraw/ # Excalidraw's fonts for the excalidraw renderer (SHA256SUMS, LICENSES.txt)
+│   └── *.min.js         # Vendored markdown-it, DOMPurify, mermaid, rough.js, perfect-freehand + laser-pointer, diff-match-patch
 ├── integrations/        # Drop-in config files for AI coding tools (claude-code, cursor, aider, …)
 ├── test/                # Test harnesses, E2E, roundtrip docs, shared fixtures
 ├── Makefile
@@ -42,7 +43,7 @@ crit/
 13. **Comment threading** — comments support nested replies and a `resolved` boolean. Review file schema nests replies inside each comment's `replies` array.
 14. **Centralized review storage** — `~/.crit/reviews/<key>.json` keyed by cwd + branch (git mode) or cwd + args (file mode)
 15. **VCS abstraction** — `vcs.go` defines a backend interface; `git_vcs.go`, `sapling.go`, and `jj.go` are the implementations. Auto-detected, overridable via `--vcs` flag or `vcs` config key. Subcommands not yet threaded through (see TODO at `main.go:1826`).
-16. **Pluggable renderers** — `web/crit-renderers.js` registry; two registration kinds: `kind: 'fence'` (by info string, `langs`) and `kind: 'file'` (by glob, `paths`, `<label> / Source` toggle, `viewMode: 'rendered'`). Built-in mermaid (`crit-renderer-mermaid.js`) covers ```` ```mermaid ````, `*.mermaid`, `*.mmd`, and injects `mermaid.min.js` only on the first diagram (not in `index.html`). New renderers ship in `web/` (no external script loading). See `docs/renderers.md`.
+16. **Pluggable renderers** — `web/crit-renderers.js` registry; two registration kinds: `kind: 'fence'` (by info string, `langs`) and `kind: 'file'` (by glob, `paths`, `<label> / Source` toggle, `viewMode: 'rendered'`). Built-in mermaid (`crit-renderer-mermaid.js`) covers ```` ```mermaid ````, `*.mermaid`, `*.mmd`, and injects `mermaid.min.js` only on the first diagram (not in `index.html`); built-in excalidraw (`crit-renderer-excalidraw.js`) covers ```` ```excalidraw ````, `*.excalidraw`, `*.excalidraw.json`, drawing with `rough.min.js` and `freehand.min.js` (freedraw) in Excalidraw's fonts; a lone scene opens in preview mode as a canvas page (`excalidraw-canvas.html` + `crit-excalidraw-canvas.js`, served by `servePreviewExcalidraw`) where the agent's hover box and pins work per element (`#excalidraw-<id>`) (`web/fonts/excalidraw`, copied from the Excalidraw repo; `SHA256SUMS` + `LICENSES.txt` there), all loaded on first use. New renderers ship in `web/` (no external script loading). See `docs/renderers.md`.
 17. **Focus mode** — sub-views over the file list: file focus, range focus (`--range A..B`), stacked focus (range layer in a stacked PR). Lives in `focus_*.go` and `/api/focus`.
 
 <important if="you are writing a plan, design doc, or implementation proposal, or about to commit">
@@ -72,14 +73,14 @@ crit                          # Review git changes (starts daemon, blocks for fe
 crit <file|dir> [...]         # Review specific files or directories (falls through to runReview)
 crit review [...]             # Explicit review invocation (same as default)
 crit live <url>               # Review a running web app in live mode (also: crit <url>)
-crit preview <file.html>      # Review a local HTML file in preview mode (also: crit <file.html>)
+crit preview <file.html>      # Review a local HTML file in preview mode (also: crit <file.html>); an Excalidraw scene (crit <file.excalidraw>) previews as a canvas
 crit stop [--all]             # Stop daemon for current directory; --all stops every daemon
 crit status [--json]          # Show review file path, daemon status, comment stats
 crit resume [--list | <id>]   # Pick a stored review to reopen (interactive list of ~/.crit/reviews)
 crit cleanup [--days N] [--force]  # Delete stale review files from ~/.crit/reviews/
 crit pull [pr-number]         # Fetch GitHub PR comments into the review file
 crit push [--dry-run] [--event <type>] [-m <msg>] [pr]  # Post review comments as a GitHub PR review
-crit pr <num|url>             # Thin shim — forwards to `crit review --pr <n>`
+crit pr [num|url]             # Thin shim — forwards to `crit review --pr <n>`; no arg = PR for current branch
 crit fetch ...                # Fetch remote artefacts (see runFetch)
 crit comment <path>:<line[-end]> <body>         # Add a comment (no server needed)
 crit comment --selector <css> [--route <path>] <body>  # Pin a DOM element (live or HTML preview)
@@ -106,20 +107,22 @@ Two-level JSON config files, merged (project overrides global):
 - **Global**: `~/.crit.config.json` — user-wide defaults
 - **Project**: `.crit.config.json` in repo root — per-project overrides
 
-Config keys: `port`, `host`, `no_open`, `share_url`, `quiet`, `output`, `author`, `base_branch`, `ignore_patterns`, `auto_viewed_patterns`, `default_markdown_view`, `agent_cmd`, `auth_token`, `auth_user_name`, `auth_user_email`, `auth_user_id`, `plan_approve_mode`, `cleanup_on_approve`, `notify_on_round_ready`, `disable_stats`, `no_update_check`, `no_integration_check`, `vcs`, `proxy_auth`, `live_cookie`, `live_cookie_file`, `live_cdp_url`, `close_on_approve_after_ms`, `stale_review_days`.
+Config keys: `port`, `host`, `no_open`, `share_url`, `quiet`, `output`, `author`, `base_branch`, `ignore_patterns`, `auto_viewed_patterns`, `default_markdown_view`, `agent_cmd`, `auth_token`, `auth_user_name`, `auth_user_email`, `auth_user_id`, `plan_approve_mode`, `cleanup_on_approve`, `notify_on_round_ready`, `disable_stats`, `no_update_check`, `no_integration_check`, `vcs`, `proxy_auth`, `live_cookie`, `live_cookie_file`, `live_cdp_url`, `close_on_approve_after_ms`, `stale_review_days`, `remote_images`, `languages`.
 
 - `base_branch` overrides auto-detected default branch (used as diff base in git mode, and by `crit pull`/`crit push`/`crit comment`)
 - `author` falls back to the configured VCS user name if not set
-- `agent_cmd`, `auth_token`, `share_url`, `proxy_auth`, `plan_approve_mode`, `close_on_approve_after_ms`, and `stale_review_days` are **global config only**; project-level config cannot override (security — prevents malicious repos from hijacking the agent command, redirecting share requests to an attacker-controlled host, weakening Claude Code permissions, or forcing a reviewer's tab to auto-close, or shortening review retention for every project)
+- `agent_cmd`, `auth_token`, `share_url`, `proxy_auth`, `plan_approve_mode`, `close_on_approve_after_ms`, `stale_review_days`, and `remote_images` are **global config only**; project-level config cannot override (security — prevents malicious repos from hijacking the agent command, redirecting share requests to an attacker-controlled host, weakening Claude Code permissions, or forcing a reviewer's tab to auto-close, or shortening review retention for every project, or making the reviewer's browser fetch agent-chosen URLs)
 - `close_on_approve_after_ms` (default: unset/disabled) — auto-close the review tab N ms after Approve with no unresolved comments; negative values are treated as unset. Not included in `crit config --generate` scaffolding.
 - `proxy_auth` (default: `false`) — when `true`, terminal `crit share` / `crit fetch` / `crit unpublish` are blocked (SSO proxy); the browser UI uses a popup relay instead. Global-only for security. See proxy-auth transport rules.
 - `cleanup_on_approve` (default: `true`) — auto-delete review file when reviewer approves with no unresolved comments
 - `stale_review_days` (default: `14`) — age in days after which the background sweep started by `crit review` / `crit plan` deletes an untouched review; unset or non-positive values use the default. Not included in `crit config --generate` scaffolding.
 - `notify_on_round_ready` (default: `false`) — opt in to a desktop notification when a review round becomes ready for the human. On macOS, install `terminal-notifier` so the notification's click action opens the review URL; without it, clicking falls back to AppleScript `display notification`, which macOS attributes to Script Editor instead of the browser
+- `remote_images` (default: `[]`) — hosts whose http(s) images and media the review page loads without a click (`"img.shields.io"`, `"*.example.com"` = subdomains only, `"*"` = any). Goes into the page CSP (`img-src`/`media-src`, `internal/server/csp.go`) and into index.html's `crit-remote-images` meta tag for `web/crit-remote-images.js`. Invalid entries are dropped with a stderr warning; a project-level value is ignored with a warning.
 - `disable_stats` (default: `false`) — disable session stats recording to `~/.crit/stats.json`
 - `ignore_patterns` are unioned (global + project both apply); types: `*.ext`, `dir/`, `exact.file`, `path/*.ext`
 - `auto_viewed_patterns` are unioned (global + project both apply); matched client-side against file paths and applied once per launch to auto-mark matching files viewed (collapsed). No runtime default (empty). Plumbed through `/api/config` only — Go does no glob matching.
 - `default_markdown_view` (`"diff"` | `"document"`, default unset = diff in git mode) — initial view for markdown files (Document/Diff toggle) in git mode. Project **overrides** global (scalar, not unioned). Invalid values are ignored with a stderr warning. No CLI flag. Plumbed through `/api/config` only.
+- `languages` (object, default `{}`) — file pattern → review language: `"markdown"` (or `"md"`) sets `file_type: "markdown"`, `"text"` (or `plaintext`/`txt`/`plain`) turns highlighting off, `"auto"` keeps detection (lets a project undo a global rule), anything else is a Shiki grammar name sent to the frontend as the file's `lang` (wins over Pierre's detection and `LANGUAGE_OVERRIDES`). Unioned, project wins per pattern. Patterns match case-insensitively; the most specific match wins (an exact name or directory over any glob, then the longest pattern). Compiled in `ResolveDaemonCLIConfig` against `web/pierre/languages.json` (written by `scripts/build-pierre.mjs`): an unknown name is a startup error. Applied by `Session.SetLanguages` before the session is served; every `detectFileType` call takes the rules. Applies to git and files modes only (live/preview sessions return before `SetLanguages`, though the config is still validated). Patterns match repo-relative paths; a malformed glob is a startup error.
 - `vcs` selects backend: `"git"` (default), `"sl"` (sapling), or `"jj"` (Jujutsu)
 - `auth_*` keys hold cached hosted-crit-web credentials (set by `crit auth`); treat as secrets
 - `live_cookie` / `live_cookie_file` forward session cookies to the upstream app in live mode (global or project; prefer gitignored `live_cookie_file` e.g. `.crit/live-cookies.txt`). CLI: `crit live --cookie`, `--cookie-file`
@@ -168,7 +171,7 @@ make e2e-report                                       # View HTML report with sc
 
 ### Projects
 
-Ten Playwright projects. Test naming convention determines which project runs which file:
+Eleven Playwright projects. Test naming convention determines which project runs which file:
 
 | Project | Port | Fixture | Test glob |
 | --- | --- | --- | --- |
@@ -179,6 +182,7 @@ Ten Playwright projects. Test naming convention determines which project runs wh
 | `multi-file-mode` | 3127 | `setup-fixtures-multifile.sh` (code + markdown files) | `*.multifile.spec.ts` |
 | `range-mode` | 3128 | `setup-fixtures-range-mode.sh` (`--range A..B` stacked git) | `*.rangemode.spec.ts` |
 | `live-mode` | 3129 | `setup-fixtures-livemode.sh` (Go upstream + crit live) | `*.livemode.spec.ts` |
+| `preview-mode` | 3126 | `setup-fixtures-preview.sh` (a lone Excalidraw scene, opened as a canvas) | `*.previewmode.spec.ts` |
 | `share-transport` | 3132 (stub crit-web on 3133) | `setup-fixtures-sharetransport.sh` (file mode + stub crit-web) | `*.sharetransport.spec.ts` |
 | `perf` | 3134 | `setup-fixtures-perf.sh` (300 files + large markdown) | `*.perf.spec.ts` |
 | `huge` | 3136 | `setup-fixtures-huge.sh` (~2,500 files; document taller than 2^22px) | `*.huge.spec.ts` |
@@ -261,7 +265,7 @@ File-scoped (require `?path=X`):
 - `POST|PUT|DELETE /api/comment/{id}/replies[/{rid}]?path=X` — reply CRUD
 - `PUT /api/comment/{id}/resolve?path=X` — set resolved state
 
-Static: `GET /files/<path>` — serve files from repo root (path traversal protected). `GET /` — embedded frontend assets.
+Static: `GET /files/<path>` — serve files from repo root (path traversal protected). `GET /custom.css` — the user's `~/.crit/custom.css` (204 when absent or unusable). `GET /` — embedded frontend assets.
 </important>
 
 <important if="you are modifying server security, request handling, or path-validation logic">
@@ -272,12 +276,15 @@ Static: `GET /files/<path>` — serve files from repo root (path traversal prote
 - Body size: 10MB for comments, 1MB for share-url via `http.MaxBytesReader`
 - HTTP server: `ReadTimeout: 15s`, `IdleTimeout: 60s` (no `WriteTimeout` — SSE needs open connections)
 - Comment renderer uses `html: true` then DOMPurify with a pinned GitHub-compatible allowlist (`web/comment-html.js`) before `innerHTML` — never trust raw comment HTML
-- Document renderer uses `html: true` intentionally (reviewing local files)
+- Review page shells (`/`, `/index.html`, `/live`, `/preview`, `/themes`, `/themes.html`) go through `serveShell` (`internal/server/csp.go`), which sends a Content-Security-Policy: `script-src 'self' 'wasm-unsafe-eval'` plus a hash of each inline `<script>` (computed per response, so editing an inline script needs no hash update; inline event handlers would break), `connect-src 'self'`, `form-action 'self'`, `frame-src 'self' http: https:` (live mode's frame navigates wherever the framed app goes), and `img-src`/`media-src` limited to `'self' data: blob:` plus `remote_images`; it also sends `X-DNS-Prefetch-Control: off` so link hostnames aren't resolved on render. `/preview-content` (the previewed HTML) and the live proxy's pages are outside this policy. Rendered HTML must pass `window.crit.remoteImages.rewriteHtml` before `innerHTML` so blocked remote images show a click-to-load placeholder instead of a CSP-blocked broken image; a click loads the image in a sandboxed iframe from `GET /remote-image?src=` (its own strict CSP). Never add an outside origin to `connect-src` or `img-src`: content on this page may be written by an agent, and any request it can trigger is a way to send data out
+- Document renderer uses `html: true` so raw HTML in Markdown still renders, but `web/document-html.js` runs html_block tokens and inline runs with html_inline through DOMPurify (default profile, no `<style>`/`<form>`/`style=`). Word-diff HTML is spliced in as a string after that, so `app.js` cleans it again with `sanitizeRendered` (keeps crit's own inline styles). A reviewed file is untrusted: it must not run script in the daemon origin
 </important>
 
 <important if="you are modifying web/ — app.js, style.css, theme.css, or index.html">
 
 Frontend split: `index.html` (HTML shell), `app.js` (all logic), `style.css` (layout/components), `theme.css` (theme variables).
+
+User stylesheet: `~/.crit/custom.css` (`config.CustomCSSPath()`) is served at `GET /custom.css` and linked as `<link id="critCustomCSS">`, which must stay the last stylesheet in `index.html` and `themes.html` (the live bootstrap inserts `style-live.css` before it). The Settings "Custom CSS" card reads `custom_css_path` / `custom_css_exists` from `/api/config`; the "Use custom CSS" switch (`customCSS` setting) disables the link via `crit-theme-palette.js`. `data-crit-mode` (`light` | `dark`) on `<html>` is for user stylesheets, so keep it and the `--crit-*` variables stable.
 
 ### Multi-file state model
 

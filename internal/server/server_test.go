@@ -1391,7 +1391,7 @@ func TestApiConfig_IncludesHostedToken(t *testing.T) {
 
 func TestPostShareURL_ReturnsHostedToken(t *testing.T) {
 	s, _ := newTestServer(t)
-	body := `{"url":"https://crit.example/r/zzz","delete_token":"d"}`
+	body := `{"url":"https://crit.example/r/zzz","target_url":"https://crit.example","delete_token":"d"}`
 	req := httptest.NewRequest("POST", "/api/share-url", strings.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
 	w := httptest.NewRecorder()
@@ -1536,7 +1536,7 @@ func TestGetConfig_MethodNotAllowed(t *testing.T) {
 func TestPostShareURL(t *testing.T) {
 	s, session := newTestServer(t)
 
-	body := `{"url":"https://crit.md/r/abc123"}`
+	body := `{"url":"https://crit.md/r/abc123","target_url":"https://crit.md"}`
 	req := httptest.NewRequest("POST", "/api/share-url", strings.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
 	w := httptest.NewRecorder()
@@ -1587,7 +1587,7 @@ func TestPostShare_RemoteDeletedCreatesFreshShare(t *testing.T) {
 	baseURL = critWeb.URL
 
 	s.shareURL = critWeb.URL
-	session.SetSharedURLAndToken(critWeb.URL+"/r/oldtoken", "old-delete-token")
+	session.SetSharedTarget(critWeb.URL+"/r/oldtoken", critWeb.URL, "old-delete-token")
 	session.SetShareScope("old-scope")
 	session.SetShareOrgInfo("old-org", "Old Org", "organization")
 
@@ -1647,7 +1647,7 @@ func TestGetConfig_IncludesDeleteToken(t *testing.T) {
 func TestPostShareURL_SavesDeleteToken(t *testing.T) {
 	s, session := newTestServer(t)
 
-	body := `{"url":"https://crit.md/r/abc","delete_token":"deletetoken1234567890x"}`
+	body := `{"url":"https://crit.md/r/abc","target_url":"https://crit.md","delete_token":"deletetoken1234567890x"}`
 	req := httptest.NewRequest("POST", "/api/share-url", strings.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
 	w := httptest.NewRecorder()
@@ -1669,14 +1669,24 @@ func TestDeleteShareURL(t *testing.T) {
 	w := httptest.NewRecorder()
 	s.ServeHTTP(w, req)
 
-	if w.Code != 204 {
-		t.Errorf("status = %d, want 204", w.Code)
+	if w.Code == http.StatusNoContent {
+		t.Fatalf("status = 204; target resolution failure must not clear share state")
 	}
-	if session.GetSharedURL() != "" {
-		t.Errorf("hostedURL should be cleared")
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400, body = %s", w.Code, w.Body.String())
 	}
-	if session.GetDeleteToken() != "" {
-		t.Errorf("deleteToken should be cleared")
+	if url, token := session.GetShareState(); url != "https://crit.md/r/abc" || token != "sometoken1234567890123" {
+		t.Fatalf("share state = %q %q, want URL and delete token kept", url, token)
+	}
+
+	req = httptest.NewRequest("DELETE", "/api/share-url?local_only=1", nil)
+	w = httptest.NewRecorder()
+	s.ServeHTTP(w, req)
+	if w.Code != http.StatusNoContent {
+		t.Fatalf("local_only status = %d, want 204", w.Code)
+	}
+	if url, token := session.GetShareState(); url != "" || token != "" {
+		t.Fatalf("local_only share state = %q %q, want cleared", url, token)
 	}
 }
 
@@ -5581,6 +5591,55 @@ func TestHandleSharePayload_MethodNotAllowed(t *testing.T) {
 	}
 }
 
+// A range review stores its focus key in cli_args for `crit --session`;
+// crit-web shows cli_args as a command to run, so neither payload carries it.
+func TestHandleSharePayloads_OmitRangeFocusKey(t *testing.T) {
+	dir := t.TempDir()
+	filePath := filepath.Join(dir, "f.go")
+	os.WriteFile(filePath, []byte("package f\n"), 0o644)
+
+	sess := &Session{
+		Mode:        "git",
+		OutputDir:   dir,
+		RepoRoot:    dir,
+		ReviewRound: 1,
+		Files: []*FileEntry{
+			{Path: "f.go", AbsPath: filePath, Status: "modified"},
+		},
+	}
+	sess.SetSharedURLAndToken("https://crit.md/r/tok123", "del-tok")
+	data, err := json.Marshal(CritJSON{CliArgs: []string{"range:abc..def"}, Files: map[string]CritJSONFile{}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	reviewPath := sesspkg.ReviewPathsFor(sess.CritJSONPath()).Review
+	if err := os.MkdirAll(filepath.Dir(reviewPath), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(reviewPath, data, 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	srv, err := NewServer(sess, frontendFS, "", false, "", "", "test", 0, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, path := range []string{"/api/share/payload", "/api/share/upsert-payload"} {
+		w := httptest.NewRecorder()
+		srv.ServeHTTP(w, httptest.NewRequest(http.MethodGet, path, nil))
+		if w.Code != 200 {
+			t.Fatalf("%s: status = %d, body = %s", path, w.Code, w.Body.String())
+		}
+		var payload map[string]any
+		if err := json.Unmarshal(w.Body.Bytes(), &payload); err != nil {
+			t.Fatalf("%s: invalid JSON: %v", path, err)
+		}
+		if got, ok := payload["cli_args"]; ok && got != nil {
+			t.Errorf("%s: cli_args = %v, want none", path, got)
+		}
+	}
+}
+
 // --- handleUpsertPayload tests ---
 
 func TestHandleUpsertPayload_HappyPath(t *testing.T) {
@@ -5809,8 +5868,6 @@ func TestHandleMergeComments_DedupStillSyncsSession(t *testing.T) {
 		ReviewRound: 1,
 		Files:       []*FileEntry{{Path: "plan.md", AbsPath: filePath}},
 	}
-	sess.SetSharedURLAndToken("https://crit.md/r/tok123", "del-tok")
-
 	writeCritJSONForTest(t, dir, CritJSON{
 		Files: map[string]CritJSONFile{
 			"plan.md": {Comments: []Comment{{
@@ -5823,6 +5880,12 @@ func TestHandleMergeComments_DedupStillSyncsSession(t *testing.T) {
 	} else {
 		sess.SetLastCritJSONMtimeForTest(info.ModTime())
 	}
+
+	// After the fixture is on disk: this schedules a debounced write, and the
+	// fixture save takes no review lock. A write that read review.json just
+	// before the save would replace the fixture with its own copy, without the
+	// comment.
+	sess.SetSharedURLAndToken("https://crit.md/r/tok123", "del-tok")
 
 	srv, err := NewServer(sess, frontendFS, "", false, "", "", "test", 0, "")
 	if err != nil {

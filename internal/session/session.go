@@ -162,6 +162,10 @@ type Comment struct {
 	GitLabDiscussionID string  `json:"gitlab_discussion_id,omitempty"`
 	GitLabResolved     *bool   `json:"gitlab_resolved,omitempty"`
 
+	// AgentStatus is set once the comment is sent to an agent (Send now,
+	// the auto-send option, or Finish) and updated by the agent itself.
+	AgentStatus *AgentStatus `json:"agent_status,omitempty"`
+
 	// LastPushedBodyHash is a short stable digest of Body at the time of
 	// the most recent successful push (POST or PATCH) to GitHub. Used by
 	// `crit push` to detect locally-edited comments that need a PATCH.
@@ -236,6 +240,12 @@ type FileEntry struct {
 	LazyAdditions int `json:"-"`
 	LazyDeletions int `json:"-"`
 
+	// ListedHash is the working-tree content hash of a lazy file, computed
+	// when the file is listed so the page can invalidate stale "viewed" marks
+	// without loading the file. Unlike FileHash it is not published with
+	// Content; it is empty for range/--pr focus and deleted files.
+	ListedHash string `json:"-"`
+
 	// Orphaned: file has comments in the review file but is no longer in the session's
 	// file list (e.g., added on branch then deleted). No content or diff available.
 	Orphaned bool `json:"-"`
@@ -243,6 +253,25 @@ type FileEntry struct {
 	// Generated: file is marked linguist-generated in the repo's top-level
 	// .gitattributes. The frontend renders these collapsed by default.
 	Generated bool `json:"-"`
+
+	// roundStart is the text the page keeps showing for the open round once
+	// the files-mode watcher has pulled a mid-round edit into Content; nil
+	// otherwise. Guarded by Session.mu.
+	roundStart *roundStartView
+}
+
+type roundStartView struct {
+	content, hash, previousContent string
+}
+
+// shownLocked returns the text the page shows in the open round, its hash, and
+// the previous-round text a files-mode markdown diff compares it with. Line
+// numbers coming from the page refer to this content. Caller holds Session.mu.
+func (f *FileEntry) shownLocked() (content, hash, previousContent string) {
+	if f.roundStart != nil {
+		return f.roundStart.content, f.roundStart.hash, f.roundStart.previousContent
+	}
+	return f.Content, f.FileHash, f.PreviousContent
 }
 
 // ShareFile represents a file payload for sharing.
@@ -252,6 +281,26 @@ type ShareFile struct {
 	Status    string `json:"status,omitempty"`
 	Generated bool   `json:"generated,omitempty"`
 	Encoding  string `json:"encoding,omitempty"`
+	// Lang and FileType carry a `languages` config override, the same
+	// values /api/session sends as lang and file_type. Empty when unknown
+	// (crawled preview assets), so crit-web falls back to its own detection.
+	Lang     string `json:"lang,omitempty"`
+	FileType string `json:"file_type,omitempty"`
+}
+
+// ShareLanguage returns the lang and file_type a share sends for path under
+// the `languages` rules: lang is "" unless a rule sets one, and file_type is
+// "markdown" or "code".
+func ShareLanguage(languages config.LanguageRules, path string) (lang, fileType string) {
+	return languages.Lang(path), detectFileType(languages, path)
+}
+
+// shareFileType returns fileType when it is one a share carries, else "".
+func shareFileType(fileType string) string {
+	if fileType == "markdown" || fileType == "code" {
+		return fileType
+	}
+	return ""
 }
 
 // ensureFileLoaded loads a lazy file using the session's current focus.
@@ -426,6 +475,9 @@ type Session struct {
 	RepoRoot       string
 	OutputDir      string // custom output directory for the review file (empty = RepoRoot)
 	ReviewFilePath string // centralized review file path (~/.crit/reviews/<key>.json)
+	// languages is the compiled `languages` config. SetLanguages sets it once,
+	// before the session is served; it is read without the lock afterwards.
+	languages      config.LanguageRules
 	PlanDir        string // managed storage dir for plan mode (empty for git/files)
 	ReviewRound    int
 	IgnorePatterns []string
@@ -459,6 +511,20 @@ type Session struct {
 	// ingested one). Read/write under s.mu; surfaced via GetSessionInfo.
 	story *Story
 
+	// roundCompletePending is true from SignalRoundComplete until the git
+	// watcher has carried comments forward. SyncWorkingTree must not touch
+	// content in that window. Read/write under s.mu.
+	roundCompletePending bool
+	// roundSignalSeq counts SignalRoundComplete calls, so a watcher run only
+	// clears roundCompletePending when no newer signal arrived meanwhile.
+	roundSignalSeq uint64
+
+	// Short-lived cache of the scope "all" file list (see liveAllChanges).
+	liveChangesMu     sync.Mutex
+	liveChanges       []vcs.FileChange
+	liveChangesKey    string
+	liveChangesExpiry time.Time
+
 	// RoundSnapshots is in-memory state populated from <folder>/snapshots.json
 	// at boot. Persisted via SaveSnapshotsFile; never written into review.json.
 	//
@@ -477,6 +543,15 @@ type Session struct {
 	// yet written to disk. Keyed by file path -> set of comment IDs. buildCritJSON's
 	// applyDeletedCommentIDs drops them after merging with disk.
 	deletedCommentIDs map[string]map[string]struct{}
+	// deletedReplyIDs lists replies the reviewer deleted, so a daemon write
+	// does not take them back from a review file that still has them.
+	deletedReplyIDs map[string]struct{}
+	// resolvedDirtyIDs lists comments whose resolved state the reviewer
+	// changed since the last write, each with the value of resolvedDirtySeq
+	// at the change. A write that takes in a CLI reply keeps the reviewer's
+	// resolved state for these instead of the one on disk.
+	resolvedDirtyIDs map[string]uint64
+	resolvedDirtySeq uint64
 
 	// pendingRemoteDeletes is the provider-neutral delete queue. A concurrent
 	// push may drain it on disk, so lastLoadedPendingDeletes prevents daemon
@@ -494,25 +569,32 @@ type Session struct {
 	// been deleted. time.Timer.Stop() does not wait for callbacks already
 	// executing, so the writeGen check alone is not sufficient to prevent a
 	// snapshot-taken-before-clear from resurrecting the file.
-	writeMu             sync.Mutex
-	pendingWrite        bool
-	sharedURL           string
-	shareBaseURL        string
-	deleteToken         string
-	shareScope          string
-	shareOrg            string
-	shareOrgName        string
-	shareVisibility     string
-	status              *Status
-	roundComplete       chan struct{}
-	pollInterval        time.Duration // watcher tick; 0 means 1s (tests shorten it)
-	pendingEdits        int
-	lastRoundEdits      int
-	lastCritJSONMtime   time.Time // mtime after our last WriteFiles(); used to detect external changes
-	awaitingFirstReview bool      // true until first review-cycle completes
-	waitingForAgent     bool      // true between finish (with unresolved comments) and round-complete
-	planHook            string    // plan_mode | codex while a plan hook waits on review-cycle
-	browserClients      int32     // number of connected SSE browser clients (atomic)
+	writeMu           sync.Mutex
+	pendingWrite      bool
+	sharedURL         string
+	shareBaseURL      string
+	deleteToken       string
+	shareScope        string
+	shareOrg          string
+	shareOrgName      string
+	shareVisibility   string
+	status            *Status
+	roundComplete     chan struct{}
+	pollInterval      time.Duration // watcher tick; 0 means 1s (tests shorten it)
+	pendingEdits      int
+	lastRoundEdits    int
+	lastCritJSONMtime time.Time // mtime after our last WriteFiles(); used to detect external changes
+	// diskHasUnloadedComments is set when our last write kept comments or
+	// replies that only disk had, so the watcher reloads despite the mtime match.
+	diskHasUnloadedComments bool
+	// writeSeq counts scheduled writes; see writeFilesSnapshot.writeSeq.
+	writeSeq            uint64
+	awaitingFirstReview bool   // true until first review-cycle completes
+	waitingForAgent     bool   // true between finish (with unresolved comments) and round-complete
+	planHook            string // plan_mode | codex while a plan hook waits on review-cycle
+	browserClients      int32  // number of connected SSE browser clients (atomic)
+
+	agent agentChannel
 
 	// Focus is the discriminator that selects what the session is showing.
 	// Defaults to FocusWorkingTree (today's behavior). Range-mode sessions
@@ -573,6 +655,16 @@ type CritJSON struct {
 	ActiveDiffScope string `json:"active_diff_scope,omitempty"`
 
 	PendingRemoteDeletes []RemoteRef `json:"pending_remote_deletes,omitempty"`
+
+	// ViewedFiles holds the reviewer's viewed marks by path, for views that
+	// are not a PR or MR layer. It is top-level rather than on CritJSONFile
+	// because Files only keeps paths with comments.
+	ViewedFiles map[string]ViewedFile `json:"viewed_files,omitempty"`
+	// ChangeViewedFiles holds the marks made on a PR or MR layer, keyed by
+	// the change's identity (focusKeyFor: forge, host, project and number)
+	// and then by path, so the same path in another layer or another
+	// repository's same-numbered PR keeps its own mark.
+	ChangeViewedFiles map[string]map[string]ViewedFile `json:"change_viewed_files,omitempty"`
 
 	// ReviewType distinguishes review modes. "" (zero value) = code review.
 	// "live" = live mode. Omitted from JSON when empty for back-compat.
@@ -698,12 +790,19 @@ func populateLazyFile(fe *FileEntry, fc vcs.FileChange, numstats map[string]vcs.
 	if ns, ok := numstats[fc.Path]; ok {
 		fe.LazyAdditions = ns.Additions
 		fe.LazyDeletions = ns.Deletions
-	} else if diskFallback && (fc.Status == "untracked" || fc.Status == "added") {
-		if data, err := os.ReadFile(fe.AbsPath); err == nil {
-			fe.LazyAdditions = strings.Count(string(data), "\n")
-			if len(data) > 0 && data[len(data)-1] != '\n' {
-				fe.LazyAdditions++
-			}
+	}
+	if !diskFallback || fc.Status == "deleted" {
+		return
+	}
+	data, err := os.ReadFile(fe.AbsPath)
+	if err != nil {
+		return
+	}
+	fe.ListedHash = fileHash(data)
+	if _, ok := numstats[fc.Path]; !ok && (fc.Status == "untracked" || fc.Status == "added") {
+		fe.LazyAdditions = strings.Count(string(data), "\n")
+		if len(data) > 0 && data[len(data)-1] != '\n' {
+			fe.LazyAdditions++
 		}
 	}
 }
@@ -915,7 +1014,7 @@ func newGitSession(v vcs.VCS, ignorePatterns []string, requireChanges bool) (*Se
 			OldPath:   fc.OldPath,
 			AbsPath:   absPath,
 			Status:    fc.Status,
-			FileType:  detectFileType(fc.Path),
+			FileType:  detectFileType(config.LanguageRules{}, fc.Path),
 			Generated: vcs.IsGenerated(fc.Path, s.generatedRules),
 		}
 
@@ -1076,7 +1175,7 @@ func NewSessionFromFiles(paths []string, ignorePatterns []string) (*Session, err
 			Path:      relPath,
 			AbsPath:   absPath,
 			Status:    "modified",
-			FileType:  detectFileType(absPath),
+			FileType:  detectFileType(config.LanguageRules{}, relPath),
 			Content:   string(data),
 			FileHash:  fileHash(data),
 			Comments:  []Comment{},
@@ -1254,13 +1353,31 @@ func isBinaryExtension(ext string) bool {
 	return false
 }
 
-// detectFileType returns "markdown" for .md files, "code" for everything else.
-func detectFileType(path string) string {
+// detectFileType returns the file type a `languages` rule sets for path, or
+// else "markdown" for .md files and "code" for everything else.
+func detectFileType(languages config.LanguageRules, path string) string {
+	if fileType, ok := languages.FileType(path); ok {
+		return fileType
+	}
 	ext := strings.ToLower(filepath.Ext(path))
 	if ext == ".md" || ext == ".markdown" || ext == ".mdown" {
 		return "markdown"
 	}
 	return "code"
+}
+
+// SetLanguages applies the `languages` config: files a rule matches are
+// reclassified now, and files added later go through the same rules. Call it
+// once, before the session is served.
+func (s *Session) SetLanguages(languages config.LanguageRules) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.languages = languages
+	for _, f := range s.Files {
+		if f.FileType == "markdown" || f.FileType == "code" {
+			f.FileType = detectFileType(languages, f.Path)
+		}
+	}
 }
 
 // FileByPath returns the FileEntry for a given relative path, or nil.
@@ -1313,7 +1430,8 @@ func (s *Session) AddComment(filePath string, startLine, endLine int, side, body
 		}
 		anchor = extractAnchor(baseContent, startLine, endLine)
 	} else {
-		anchor = extractAnchor(f.Content, startLine, endLine)
+		shown, _, _ := f.shownLocked()
+		anchor = extractAnchor(shown, startLine, endLine)
 	}
 
 	now := time.Now().UTC().Format(time.RFC3339)
@@ -1476,14 +1594,16 @@ func (s *Session) UpdateReviewComment(id, body string) (Comment, bool) {
 }
 
 // DeleteReviewComment deletes a review-level comment by ID. Review-level
-// comments are local-only (not synced to GitHub PR review comments), so a
-// straight removal is safe — there is no upstream record to tombstone.
+// comments are local-only (not synced to GitHub PR review comments), so there
+// is no upstream record to delete. The local tombstone stops the next write
+// from re-adding the comment from disk.
 func (s *Session) DeleteReviewComment(id string) bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	for i, c := range s.reviewComments {
 		if c.ID == id {
 			s.reviewComments = append(s.reviewComments[:i], s.reviewComments[i+1:]...)
+			s.trackDeletedComment(reviewCommentTombstones, id)
 			s.scheduleWrite()
 			return true
 		}
@@ -1506,6 +1626,7 @@ func (s *Session) ResolveReviewComment(id string, resolved bool) (Comment, bool)
 				s.reviewComments[i].ResolvedRound = 0
 			}
 			s.reviewComments[i].UpdatedAt = time.Now().UTC().Format(time.RFC3339)
+			s.markResolvedDirtyLocked(id)
 			s.scheduleWrite()
 			return s.reviewComments[i], true
 		}
@@ -1559,6 +1680,7 @@ func (s *Session) AddReviewCommentReply(commentID, body, author, userID string) 
 			s.reviewComments[i].Resolved = false
 			s.reviewComments[i].ResolvedRound = 0
 			s.reviewComments[i].UpdatedAt = now
+			s.markResolvedDirtyLocked(commentID)
 			s.scheduleWrite()
 			return r, true
 		}
@@ -1597,6 +1719,7 @@ func (s *Session) DeleteReviewCommentReply(commentID, replyID string) bool {
 				if r.ID == replyID {
 					s.reviewComments[i].Replies = append(s.reviewComments[i].Replies[:j], s.reviewComments[i].Replies[j+1:]...)
 					s.reviewComments[i].UpdatedAt = time.Now().UTC().Format(time.RFC3339)
+					s.markReplyDeletedLocked(replyID)
 					s.scheduleWrite()
 					return true
 				}
@@ -1680,6 +1803,7 @@ func (s *Session) SetCommentResolved(filePath, id string, resolved bool) (Commen
 		f.Comments[i].ResolvedRound = 0
 	}
 	f.Comments[i].UpdatedAt = time.Now().UTC().Format(time.RFC3339)
+	s.markResolvedDirtyLocked(id)
 	s.scheduleWrite()
 	return f.Comments[i], true
 }
@@ -1773,8 +1897,13 @@ func (s *Session) appendPendingRemoteDelete(ref RemoteRef) {
 	s.pendingRemoteDeletes = append(s.pendingRemoteDeletes, ref)
 }
 
-// trackDeletedComment records a file comment ID as deleted so the merge logic
-// does not re-add it from disk. Caller must hold s.mu.
+// reviewCommentTombstones is the deletedCommentIDs key for review-level
+// comments. It contains NUL, so it never collides with a file path.
+const reviewCommentTombstones = "\x00review"
+
+// trackDeletedComment records a comment ID as deleted so the merge logic does
+// not re-add it from disk. filePath is the comment's file, or
+// reviewCommentTombstones for a review-level comment. Caller must hold s.mu.
 func (s *Session) trackDeletedComment(filePath, id string) {
 	if s.deletedCommentIDs == nil {
 		s.deletedCommentIDs = make(map[string]map[string]struct{})
@@ -1830,6 +1959,7 @@ func (s *Session) AddReply(filePath, commentID, body, author, userID string) (Re
 	f.Comments[i].Resolved = false
 	f.Comments[i].ResolvedRound = 0
 	f.Comments[i].UpdatedAt = now
+	s.markResolvedDirtyLocked(commentID)
 	s.scheduleWrite()
 	return r, true
 }
@@ -1872,6 +2002,7 @@ func (s *Session) DeleteReply(filePath, commentID, replyID string) bool {
 			}
 			f.Comments[i].Replies = append(f.Comments[i].Replies[:j], f.Comments[i].Replies[j+1:]...)
 			f.Comments[i].UpdatedAt = time.Now().UTC().Format(time.RFC3339)
+			s.markReplyDeletedLocked(replyID)
 			s.scheduleWrite()
 			return true
 		}
@@ -2068,7 +2199,7 @@ func (s *Session) EnsureFileEntry(path string) bool {
 		Path:      path,
 		AbsPath:   absPath,
 		Status:    status,
-		FileType:  detectFileType(path),
+		FileType:  detectFileType(s.languages, path),
 		Content:   string(data),
 		FileHash:  fileHash(data),
 		Comments:  []Comment{},
@@ -2195,6 +2326,8 @@ func (s *Session) LoadShareFilesFromDisk() []ShareFile {
 		orphaned              bool
 		generated             bool
 		hasUnresolvedComments bool
+		lang                  string
+		fileType              string
 	}
 	infos := make([]fileInfo, 0, len(s.Files))
 	for _, f := range s.Files {
@@ -2205,7 +2338,16 @@ func (s *Session) LoadShareFilesFromDisk() []ShareFile {
 				break
 			}
 		}
-		infos = append(infos, fileInfo{path: f.Path, absPath: f.AbsPath, status: f.Status, orphaned: f.Orphaned, generated: f.Generated, hasUnresolvedComments: hasUnresolved})
+		infos = append(infos, fileInfo{
+			path:                  f.Path,
+			absPath:               f.AbsPath,
+			status:                f.Status,
+			orphaned:              f.Orphaned,
+			generated:             f.Generated,
+			hasUnresolvedComments: hasUnresolved,
+			lang:                  s.languages.Lang(f.Path),
+			fileType:              shareFileType(f.FileType),
+		})
 	}
 	s.mu.RUnlock()
 
@@ -2228,7 +2370,14 @@ func (s *Session) LoadShareFilesFromDisk() []ShareFile {
 		if err != nil {
 			continue // file may have been removed since session started
 		}
-		files = append(files, ShareFile{Path: fi.path, Content: string(data), Status: fi.status, Generated: fi.generated})
+		files = append(files, ShareFile{
+			Path:      fi.path,
+			Content:   string(data),
+			Status:    fi.status,
+			Generated: fi.generated,
+			Lang:      fi.lang,
+			FileType:  fi.fileType,
+		})
 	}
 	return files
 }
@@ -2320,6 +2469,10 @@ func (s *Session) isWaitingForAgent() bool {
 // the review file. This prevents a TOCTOU race where GetSessionInfo could observe the
 // new round number before carry-forward is complete, returning empty comments.
 func (s *Session) SignalRoundComplete() {
+	// Wait for an in-flight write (SyncWorkingTree saves moved comment
+	// positions synchronously) so the watcher reloads what matches Content.
+	s.writeMu.Lock()
+	defer s.writeMu.Unlock()
 	s.mu.Lock()
 	if s.writeTimer != nil {
 		s.writeTimer.Stop()
@@ -2329,6 +2482,8 @@ func (s *Session) SignalRoundComplete() {
 	s.lastRoundEdits = s.pendingEdits
 	s.pendingEdits = 0
 	s.waitingForAgent = false
+	s.roundCompletePending = s.Mode == "git"
+	s.roundSignalSeq++
 	// Clear comments on all files.
 	// ReviewRound is incremented later by the watcher after carry-forward.
 	for _, f := range s.Files {
@@ -2349,7 +2504,7 @@ func (s *Session) ClearAllComments() {
 	// Hold writeMu for the duration so any in-flight debounced write must
 	// finish (and observe the new writeGen) before we proceed. Without this,
 	// a WriteFiles() call that passed the gen check a moment ago could
-	// atomicWriteFile the old snapshot back onto disk after os.Remove below.
+	// AtomicWriteFile the old snapshot back onto disk after os.Remove below.
 	s.writeMu.Lock()
 	defer s.writeMu.Unlock()
 	s.mu.Lock()
@@ -2369,6 +2524,7 @@ func (s *Session) ClearAllComments() {
 		f.Comments = []Comment{}
 		f.PreviousComments = nil
 		f.PreviousContent = ""
+		f.roundStart = nil
 		filtered = append(filtered, f)
 	}
 	s.Files = filtered
@@ -2384,8 +2540,9 @@ func (s *Session) ClearAllComments() {
 	s.lastRoundEdits = 0
 	critPath := s.critJSONPath()
 	s.mu.Unlock()
+	s.ResetAgentChannel()
 	// Full-folder cleanup; idempotent on missing folder.
-	if err := os.RemoveAll(critPath); err != nil && !os.IsNotExist(err) {
+	if err := ClearReviewFolder(critPath); err != nil {
 		fmt.Fprintf(os.Stderr, "Warning: removing review folder: %v\n", err)
 	}
 }
@@ -2466,7 +2623,7 @@ func (s *Session) ChangeBaseBranch(branch string) error { //nolint:gocyclo // in
 			OldPath:   fc.OldPath,
 			AbsPath:   absPath,
 			Status:    fc.Status,
-			FileType:  detectFileType(fc.Path),
+			FileType:  detectFileType(s.languages, fc.Path),
 			Comments:  []Comment{},
 			Generated: vcs.IsGenerated(fc.Path, generatedRules),
 		}
@@ -2806,7 +2963,7 @@ func (s *Session) applyOrphanedCritFile(path string, cf CritJSONFile, byPath, by
 	fe := &FileEntry{
 		Path:     path,
 		Status:   "removed",
-		FileType: detectFileType(path),
+		FileType: detectFileType(s.languages, path),
 		Comments: comments,
 		Orphaned: true,
 	}
@@ -2905,12 +3062,14 @@ func (s *Session) GetFileSnapshot(path string) (map[string]any, bool) {
 
 	s.mu.RLock()
 	defer s.mu.RUnlock()
+	content, hash, _ := f.shownLocked()
 	return map[string]any{
 		"path":      f.Path,
 		"status":    f.Status,
 		"file_type": f.FileType,
-		"content":   f.Content,
-		"file_hash": f.FileHash,
+		"lang":      s.languages.Lang(f.Path),
+		"content":   content,
+		"file_hash": hash,
 	}, true
 }
 
@@ -2953,7 +3112,8 @@ func (s *Session) GetFileSnapshotFromDisk(path string) (map[string]any, bool) {
 	return map[string]any{
 		"path":      path,
 		"status":    "modified",
-		"file_type": detectFileType(path),
+		"file_type": detectFileType(s.languages, path),
+		"lang":      s.languages.Lang(path),
 		"content":   string(data),
 		"file_hash": fileHash(data),
 	}, true
@@ -3072,8 +3232,7 @@ func (s *Session) GetFileDiffSnapshot(path string, ignoreWhitespace bool) (map[s
 	}
 
 	// Markdown in files mode: snapshot content, then compute LCS diff outside the lock
-	prevContent := f.PreviousContent
-	currContent := f.Content
+	currContent, _, prevContent := f.shownLocked()
 	s.mu.RUnlock()
 
 	var hunks []vcs.DiffHunk
@@ -3108,16 +3267,21 @@ type SessionInfo struct {
 
 // SessionFileInfo is a summary of a file for the session API response.
 type SessionFileInfo struct {
-	Path         string `json:"path"`
-	OldPath      string `json:"old_path,omitempty"`
-	Status       string `json:"status"`
-	FileType     string `json:"file_type"`
+	Path     string `json:"path"`
+	OldPath  string `json:"old_path,omitempty"`
+	Status   string `json:"status"`
+	FileType string `json:"file_type"`
+	// Lang is the highlighting language a `languages` rule sets; empty
+	// leaves detection to the frontend.
+	Lang         string `json:"lang,omitempty"`
 	CommentCount int    `json:"comment_count"`
 	Additions    int    `json:"additions"`
 	Deletions    int    `json:"deletions"`
 	Lazy         bool   `json:"lazy,omitempty"`
 	Orphaned     bool   `json:"orphaned,omitempty"`
 	Generated    bool   `json:"generated,omitempty"`
+	// FileHash is the working-tree hash of a lazy (not yet loaded) file.
+	FileHash string `json:"file_hash,omitempty"`
 }
 
 // GetSessionInfo returns a snapshot of session metadata.
@@ -3173,6 +3337,7 @@ func (s *Session) GetSessionInfo() SessionInfo {
 			OldPath:      f.OldPath,
 			Status:       f.Status,
 			FileType:     f.FileType,
+			Lang:         s.languages.Lang(f.Path),
 			CommentCount: visibleCount,
 			Lazy:         f.Lazy,
 			Orphaned:     f.Orphaned,
@@ -3182,6 +3347,7 @@ func (s *Session) GetSessionInfo() SessionInfo {
 			// Use pre-computed stats from git diff --numstat
 			fi.Additions = f.LazyAdditions
 			fi.Deletions = f.LazyDeletions
+			fi.FileHash = f.ListedHash
 		} else {
 			// Count additions/deletions from diff hunks
 			for _, h := range f.DiffHunks {

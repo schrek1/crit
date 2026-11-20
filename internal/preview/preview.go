@@ -6,14 +6,13 @@ import (
 	"flag"
 	"fmt"
 	"os"
-	"os/signal"
 	"path/filepath"
-	"syscall"
 
 	"github.com/tomasz-tomczyk/crit/internal/browser"
 	"github.com/tomasz-tomczyk/crit/internal/clicmd"
 	"github.com/tomasz-tomczyk/crit/internal/config"
 	"github.com/tomasz-tomczyk/crit/internal/daemon"
+	"github.com/tomasz-tomczyk/crit/internal/session"
 )
 
 // PreviewSessionKey returns the session key for preview mode.
@@ -25,13 +24,14 @@ func PreviewSessionKey(cwd, absPath string) string {
 	return hex.EncodeToString(h.Sum(nil))[:12]
 }
 
-// LooksLikePreviewArgs returns true when args is a single .html/.htm file path.
+// LooksLikePreviewArgs returns true when args is a single .html/.htm file
+// path, or a single Excalidraw scene (previewed as a canvas page).
 func LooksLikePreviewArgs(args []string) bool {
 	if len(args) != 1 {
 		return false
 	}
 	ext := filepath.Ext(args[0])
-	if ext != ".html" && ext != ".htm" {
+	if ext != ".html" && ext != ".htm" && !session.IsExcalidrawScene(args[0]) {
 		return false
 	}
 	info, err := os.Stat(args[0])
@@ -96,7 +96,7 @@ func RunPreview(args []string) {
 	quietResolved := *quiet || cfg.Quiet
 
 	if rawPath == "" {
-		fmt.Fprintln(os.Stderr, "Usage: crit preview <file.html>")
+		fmt.Fprintln(os.Stderr, "Usage: crit preview <file.html|file.excalidraw>")
 		os.Exit(1)
 	}
 
@@ -129,7 +129,7 @@ func RunPreview(args []string) {
 		fmt.Fprintf(os.Stderr, "[crit] open %s/preview\n", entry.BaseURL())
 	}
 
-	installDaemonSignalHandler(entry.PID)
+	daemon.StopOnSignal(entry, daemon.TerminationSignals()...)
 
 	// Daemon owns the initial browser open (same as crit live after #768).
 	// Opening here too doubles the tab on cold start.
@@ -157,17 +157,4 @@ func resolvePreviewShareURL(flagValue string, cfg config.Config) string {
 		return ""
 	}
 	return target.URL
-}
-
-func installDaemonSignalHandler(pid int) {
-	sigCh := make(chan os.Signal, 1)
-	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
-	go func() {
-		<-sigCh
-		proc, err := os.FindProcess(pid)
-		if err == nil {
-			_ = daemon.TerminateProcess(proc)
-		}
-		os.Exit(0)
-	}()
 }

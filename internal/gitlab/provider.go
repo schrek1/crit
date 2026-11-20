@@ -3,6 +3,7 @@ package gitlab
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/url"
 	"strconv"
@@ -72,7 +73,7 @@ func (p Provider) Detect(ctx context.Context, repo forge.RepoContext) (forge.Cha
 		return forge.ChangeID{}, fmt.Errorf("parsing GitLab merge request list: %w", err)
 	}
 	if len(mrs) == 0 {
-		return forge.ChangeID{}, fmt.Errorf("no GitLab merge request found for current branch (try: crit pull <mr-iid>)")
+		return forge.ChangeID{}, fmt.Errorf("no GitLab merge request found for current branch; pass the MR iid or URL explicitly")
 	}
 	return forge.ChangeID{Number: mrs[0].IID, Host: repo.Host, Project: repo.Project}, nil
 }
@@ -188,12 +189,20 @@ func (p Provider) ListOpen(ctx context.Context, repo forge.RepoContext) ([]forge
 	return result, nil
 }
 
+var errViewedUnsupported = errors.New("--viewed is only supported for GitHub pull requests")
+
 func (p Provider) Pull(ctx context.Context, request forge.PullRequest) (forge.PullResult, error) {
+	if request.Viewed {
+		return forge.PullResult{}, errViewedUnsupported
+	}
 	request.Repo = p.repo(request.Repo)
 	return runPull(ctx, request)
 }
 
 func (p Provider) Push(ctx context.Context, request forge.PushRequest) (forge.PushResult, error) {
+	if request.Viewed {
+		return forge.PushResult{}, errViewedUnsupported
+	}
 	request.Repo = p.repo(request.Repo)
 	return runPush(ctx, request)
 }

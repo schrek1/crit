@@ -4,6 +4,8 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>Crit</title>
+<!-- remote_images allowlist, filled in by the server (internal/server/csp.go). -->
+<meta name="crit-remote-images" content="[]">
 <link rel="icon" type="image/png" sizes="96x96" href="favicon-96x96.png">
 <link rel="icon" type="image/svg+xml" href="favicon.svg">
 <link rel="apple-touch-icon" sizes="180x180" href="apple-touch-icon.png">
@@ -14,10 +16,14 @@
 <link rel="stylesheet" href="theme.css">
 <link rel="stylesheet" href="crit-palette.css">
 <link rel="stylesheet" href="style.css">
+<!-- The user's ~/.crit/custom.css (empty if none); last, so its rules win. -->
+<link rel="stylesheet" href="custom.css" id="critCustomCSS">
 <!-- Theme palette before first paint, in every mode (review, live, preview). -->
 <script src="pierre/palettes.js"></script>
 <script src="crit-theme-palette.js"></script>
 <script>window.crit.themePalette.applySaved();</script>
+<!-- Click-to-load placeholders for remote images, in every mode. -->
+<script src="crit-remote-images.js"></script>
 </head>
 <body>
 
@@ -94,7 +100,18 @@
         </svg>
       </button>
     </div>
-    <div class="scope-toggle" id="scopeToggle" style="display:none">
+    <div class="scope-toggle" id="scopeToggle" role="group" aria-label="Diff scope" style="display:none">
+      <span class="scope-pin" id="scopePin" hidden>
+        <span class="scope-pin-label" id="scopePinLabel">
+          <svg class="scope-pin-icon" width="12" height="12" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" aria-hidden="true"><circle cx="8" cy="8" r="3"/><path d="M1 8h4M11 8h4"/></svg>
+          <span class="scope-pin-kind" id="scopePinKind"></span>
+          <span class="scope-pin-ref" id="scopePinRef"></span>
+          <span class="scope-pin-note" id="scopePinNote"></span>
+        </span>
+        <button type="button" class="scope-pin-clear" id="scopePinClear">
+          <svg width="10" height="10" viewBox="0 0 10 10" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" aria-hidden="true"><path d="M2 2l6 6M8 2l-6 6"/></svg>
+        </button>
+      </span>
       <button class="toggle-btn active" data-scope="all" title="All changes">All</button>
       <button class="toggle-btn" data-scope="branch" title="Committed changes">Branch</button>
       <button class="toggle-btn" data-scope="staged" title="Staged changes">Staged</button>
@@ -119,6 +136,15 @@
     <button class="btn btn-primary" id="finishBtn">Approve</button>
   </div>
 </div>
+
+<section class="prompt-problems" id="promptProblems" aria-label="Finish prompt problems" hidden>
+  <div>
+    <strong>Finish prompt problems</strong>
+    <ul id="promptProblemList" aria-live="polite"></ul>
+    <span id="promptRecheckStatus" role="status"></span>
+  </div>
+  <button type="button" class="btn" id="promptRecheckBtn">Recheck</button>
+</section>
 
 <div id="toc" class="toc toc-hidden">
   <div class="toc-header">
@@ -204,6 +230,15 @@
     <div class="pr-panel-body" id="prPanelBody"></div>
   </div>
 </div>
+
+<dialog class="waiting-dialog finish-error-dialog" id="finishErrorDialog" aria-labelledby="finishErrorHeading" aria-describedby="finishErrorMessage">
+  <h3 id="finishErrorHeading">Unable to finish review</h3>
+  <p id="finishErrorMessage"></p>
+  <p>Fix the prompt, then try again.</p>
+  <form method="dialog">
+    <button type="submit" class="btn btn-primary" autofocus>Back to review</button>
+  </form>
+</dialog>
 
 <div class="waiting-overlay" id="waitingOverlay" role="dialog" aria-modal="true" aria-labelledby="waitingHeading">
   <div class="waiting-dialog" id="waitingDialog">
@@ -355,7 +390,8 @@
       var l = document.createElement('link');
       l.rel = 'stylesheet';
       l.href = 'style-live.css';
-      document.head.appendChild(l);
+      // Before the user's custom.css, which must stay last.
+      document.head.insertBefore(l, document.getElementById('critCustomCSS'));
 
       // Sub-modules loaded in parallel; live-mode.js (loaded last) requires
       // their window.crit.* / window.crit.live.* namespaces to be present.
@@ -455,6 +491,7 @@
       var v1 = document.createElement('script'); v1.src = 'markdown-it.min.js'; v1.async = false; document.body.appendChild(v1);
       var dp = document.createElement('script'); dp.src = 'dompurify.min.js'; dp.async = false; document.body.appendChild(dp);
       var chm = document.createElement('script'); chm.src = 'comment-html.js'; chm.async = false; document.body.appendChild(chm);
+      var dh = document.createElement('script'); dh.src = 'document-html.js'; dh.async = false; document.body.appendChild(dh);
       var v4 = document.createElement('script'); v4.src = 'diff-match-patch.min.js'; v4.async = false; document.body.appendChild(v4);
       // Shared helpers (escapeHTML, fetchJSON, installSidebarResize, theme cookie, etc.)
       // used by app.js. Must load before app.js.
@@ -479,11 +516,12 @@
       // Shiki highlighting for fenced code (comments, documents), then line-block
       // building (buildLineBlocks). Both must load before app.js.
       var chl = document.createElement('script'); chl.src = 'crit-code-highlight.js'; chl.async = false; document.body.appendChild(chl);
-      // Pluggable renderers (registry, fullscreen overlay, built-in mermaid).
-      // Must load before crit-line-blocks.js and app.js.
+      // Pluggable renderers (registry, fullscreen overlay, built-in mermaid
+      // and excalidraw). Must load before crit-line-blocks.js and app.js.
       var rg = document.createElement('script'); rg.src = 'crit-renderers.js'; rg.async = false; document.body.appendChild(rg);
       var dov = document.createElement('script'); dov.src = 'crit-diagram-overlay.js'; dov.async = false; document.body.appendChild(dov);
       var rm = document.createElement('script'); rm.src = 'crit-renderer-mermaid.js'; rm.async = false; document.body.appendChild(rm);
+      var rx = document.createElement('script'); rx.src = 'crit-renderer-excalidraw.js'; rx.async = false; document.body.appendChild(rx);
       var lb = document.createElement('script'); lb.src = 'crit-line-blocks.js'; lb.async = false; document.body.appendChild(lb);
       // Word-level diff computation (pure functions). Must load before app.js.
       var df = document.createElement('script'); df.src = 'crit-diff-renderer.js'; df.async = false; document.body.appendChild(df);

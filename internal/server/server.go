@@ -11,7 +11,6 @@ import (
 	"io/fs"
 	"log"
 	"math"
-	"net"
 	"net/http"
 	"os"
 	"os/exec"
@@ -148,8 +147,14 @@ func NewServer(session *Session, frontendFS embed.FS, shareURL string, proxyAuth
 	mux.HandleFunc("/preview-content/", s.handlePreviewContent)
 	mux.HandleFunc("/preview-content", s.handlePreviewContent)
 
+	// Click-to-load frame for one remote image (see csp.go). No session needed.
+	mux.HandleFunc("/remote-image", s.handleRemoteImage)
+
 	// Theme preview page — static samples, no session needed.
 	mux.HandleFunc("/themes", s.serveHTML("themes.html"))
+
+	// The user's own stylesheet, linked last from index.html and themes.html.
+	mux.HandleFunc("/custom.css", s.handleCustomCSS)
 
 	// Live-mode routes — NOT wrapped in withReady.
 	mux.HandleFunc("/live", s.serveIndexHTML())
@@ -208,6 +213,7 @@ func NewServer(session *Session, frontendFS embed.FS, shareURL string, proxyAuth
 	mux.HandleFunc("/api/review-comment/", s.withReady(s.handleReviewCommentByID))
 	mux.HandleFunc("/api/files/list", s.withReady(s.handleFilesList))
 	mux.HandleFunc("/api/files/comments", s.withReady(s.handleAllFileComments))
+	mux.HandleFunc("/api/viewed", s.withReady(s.handleViewed))
 	mux.HandleFunc("/api/story", s.withReady(s.handleStory))
 
 	// File-scoped endpoints (use ?path= query param)
@@ -229,7 +235,7 @@ func NewServer(session *Session, frontendFS embed.FS, shareURL string, proxyAuth
 	// Static file serving (repo files need session; embedded assets do not)
 	mux.HandleFunc("/files/", s.withReady(s.handleFiles))
 	mux.Handle(precompressedPrefix, servePrecompressed(frontendFS))
-	mux.Handle("/", http.FileServer(http.FS(frontendFS)))
+	mux.Handle("/", s.serveAssets(frontendFS))
 
 	s.mux = mux
 	return s, nil
@@ -261,7 +267,7 @@ func isLoopbackHost(host string) bool {
 // is bound to a loopback address, the request's Host header must also resolve
 // to a loopback hostname — this is the canonical DNS-rebinding defense.
 func (s *Server) checkHost(r *http.Request) bool {
-	host := requestHost(r.Host)
+	host := config.RequestHost(r.Host)
 	if s.publicURLHost != "" && strings.EqualFold(host, s.publicURLHost) {
 		return true
 	}
@@ -269,18 +275,6 @@ func (s *Server) checkHost(r *http.Request) bool {
 		return true
 	}
 	return isLoopbackHost(host)
-}
-
-func requestHost(hostport string) string {
-	host := hostport
-	if h, _, err := net.SplitHostPort(host); err == nil {
-		host = h
-	} else {
-		// SplitHostPort fails when there's no port (e.g. "Host: [::1]").
-		// Strip IPv6 brackets so ParseIP can recognise the address.
-		host = strings.TrimSuffix(strings.TrimPrefix(host, "["), "]")
-	}
-	return host
 }
 
 func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -303,7 +297,7 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 // hostForbiddenMessage explains a checkHost rejection so a reverse-proxy /
 // --public-url misconfig is diagnosable from the 403 body (see #788).
 func (s *Server) hostForbiddenMessage(r *http.Request) string {
-	host := requestHost(r.Host)
+	host := config.RequestHost(r.Host)
 	if s.publicURLHost == "" {
 		return fmt.Sprintf(
 			"Forbidden: request Host %q does not match loopback (set --public-url if reaching Crit via a reverse proxy)",
@@ -433,6 +427,11 @@ func (s *Server) WaitBackground(timeout time.Duration) bool {
 func (s *Server) SetSession(session *Session) {
 	if session != nil {
 		session.MarkSessionStarted()
+		if s.configConfigured {
+			for _, problem := range s.checkFinishPrompts(session) {
+				fmt.Fprintf(os.Stderr, "Warning: finish prompt %s\n", problem)
+			}
+		}
 	}
 	s.session.Store(session)
 }
@@ -518,6 +517,9 @@ func (s *Server) handleConfig(w http.ResponseWriter, r *http.Request) { //nolint
 		"agent_cmd_enabled":   s.agentCmd != "",
 		"agent_name":          agentName(s.agentCmd),
 		"agent_cmd":           s.agentCmd,
+		// Send now can reach an agent waiting on the review; /api/session
+		// reports whether one is there.
+		"agent_instant_replies": s.cfg.AgentInstantReplies,
 
 		// Auth status
 		"auth_logged_in":  selectedErr == nil && selected.Auth.Token != "",
@@ -566,17 +568,29 @@ func (s *Server) handleConfig(w http.ResponseWriter, r *http.Request) { //nolint
 		resp["close_on_approve_after_ms"] = ms
 	}
 
+	// The user's own stylesheet, for the settings panel's Custom CSS card.
+	if path := config.CustomCSSPath(); path != "" {
+		resp["custom_css_path"] = path
+		info, err := os.Stat(path)
+		resp["custom_css_exists"] = err == nil && info.Mode().IsRegular()
+	}
+
 	// Integration detection
 	s.addIntegrationStatus(resp)
 
-	for k, v := range s.projectPromptTrustPayload() {
-		resp[k] = v
+	globalPrompts, projectPrompts, trust := s.loadPromptConfig()
+	resp["project_prompts_untrusted"] = trust.Untrusted
+	if trust.HasProjectPrompts {
+		resp["project_prompt_sources"] = trust.Sources
+		resp["project_prompt_content_hash"] = trust.ContentHash
 	}
-	if sess != nil && s.projectPromptsUntrusted() {
-		resp["project_prompt_preview"] = s.renderProjectPromptPreview(sess)
+	mode := finishPromptMode(sess)
+	resp["prompt_problems"] = prompt.Check(globalPrompts, projectPrompts, s.projectDir, s.homeDir, mode, trust.UseProject)
+	if trust.Untrusted {
+		resp["project_prompt_preview"] = prompt.PreviewProjectFinish(projectPrompts, s.projectDir, mode)
 	}
 
-	if sess != nil && sess.ReviewType != "" {
+	if sess.ReviewType != "" {
 		resp["review_type"] = sess.ReviewType
 	}
 
@@ -716,15 +730,29 @@ func (s *Server) handleSession(w http.ResponseWriter, r *http.Request) {
 	}
 	type liveSessionResponse struct {
 		SessionInfo
-		ReviewType string `json:"review_type,omitempty"`
-		Origin     string `json:"origin,omitempty"`
-		ProxyPort  int    `json:"proxy_port,omitempty"`
+		ReviewType      string           `json:"review_type,omitempty"`
+		Origin          string           `json:"origin,omitempty"`
+		ProxyPort       int              `json:"proxy_port,omitempty"`
+		PromptProblems  []prompt.Problem `json:"prompt_problems,omitempty"`
+		AgentListening  bool             `json:"agent_listening"`
+		AgentLoopActive bool             `json:"agent_loop_active"`
+		// AgentLoopUntil is when the loop stops counting as active unless the
+		// agent comes back; set only while no agent listens.
+		AgentLoopUntil string `json:"agent_loop_until,omitempty"`
 	}
 	resp := liveSessionResponse{SessionInfo: info}
 	if session != nil {
 		resp.ReviewType = session.ReviewType
 		resp.Origin = session.Origin
 		resp.ProxyPort = session.ProxyPort
+		if r.URL.Query().Get("check_prompts") == "1" {
+			resp.PromptProblems = s.checkFinishPrompts(session)
+		}
+		resp.AgentListening = session.HasAgentListener()
+		resp.AgentLoopActive = session.AgentLoopActive(time.Now())
+		if until, ok := session.AgentLoopActiveUntil(); ok {
+			resp.AgentLoopUntil = until.UTC().Format(time.RFC3339Nano)
+		}
 	}
 	writeJSON(w, resp)
 }
@@ -738,21 +766,30 @@ func (s *Server) serveIndexHTML() http.HandlerFunc {
 // serveHTML serves an embedded HTML page at a clean path (e.g. /themes).
 func (s *Server) serveHTML(name string) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != http.MethodGet {
+		if r.Method != http.MethodGet && r.Method != http.MethodHead {
 			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
 			return
 		}
-		f, err := s.assets.Open(name)
-		if err != nil {
-			http.Error(w, "not found", http.StatusNotFound)
-			return
-		}
-		defer f.Close()
-		w.Header().Set("Content-Type", "text/html; charset=utf-8")
-		if _, err := io.Copy(w, f); err != nil {
-			log.Printf("serveHTML %s: %v", name, err)
-		}
+		s.serveShell(w, name)
 	}
+}
+
+// serveAssets serves the embedded frontend. The HTML shells go through
+// serveShell so they carry the review page's Content-Security-Policy.
+func (s *Server) serveAssets(frontendFS embed.FS) http.Handler {
+	files := http.FileServer(http.FS(frontendFS))
+	index := s.serveHTML("index.html")
+	themes := s.serveHTML("themes.html")
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/", "/index.html":
+			index(w, r)
+		case "/themes.html":
+			themes(w, r)
+		default:
+			files.ServeHTTP(w, r)
+		}
+	})
 }
 
 func (s *Server) handleCritAgentJS(w http.ResponseWriter, r *http.Request) {
@@ -807,6 +844,33 @@ func (s *Server) serveEmbeddedCSS(name string) http.HandlerFunc {
 		w.Header().Set("Cache-Control", "no-cache")
 		io.Copy(w, f)
 	}
+}
+
+// handleCustomCSS serves ~/.crit/custom.css, read on every request so edits
+// apply on reload. Without one it answers 204 No Content, an empty
+// stylesheet, so pages can link it unconditionally. A file that exists but
+// can't be read is logged.
+func (s *Server) handleCustomCSS(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	w.Header().Set("Cache-Control", "no-cache")
+	path := config.CustomCSSPath()
+	if path == "" {
+		w.WriteHeader(http.StatusNoContent)
+		return
+	}
+	css, err := os.ReadFile(path)
+	if err != nil {
+		if !errors.Is(err, fs.ErrNotExist) {
+			log.Printf("custom.css: %v", err)
+		}
+		w.WriteHeader(http.StatusNoContent)
+		return
+	}
+	w.Header().Set("Content-Type", "text/css; charset=utf-8")
+	_, _ = w.Write(css)
 }
 
 // filterFilesAtRound returns the subset of files that have a snapshot recorded
@@ -934,12 +998,6 @@ func (s *Server) handleShareURL(w http.ResponseWriter, r *http.Request) { //noli
 			http.Error(w, "Bad request", http.StatusBadRequest)
 			return
 		}
-		if body.TargetURL == "" {
-			targets, _ := s.resolvedShareTargets()
-			if inferred, ok := config.InferShareBaseURL(body.URL, targets); ok {
-				body.TargetURL = inferred
-			}
-		}
 		var target config.ShareTarget
 		var err error
 		if !s.configConfigured && s.shareURL == "" && body.TargetURL != "" {
@@ -976,14 +1034,17 @@ func (s *Server) handleShareURL(w http.ResponseWriter, r *http.Request) { //noli
 		// (proxy_auth popup path passes local_only=1 after the relay DELETE).
 		localOnly := r.URL.Query().Get("local_only") == "1"
 		if !localOnly {
-			if target, targetErr := s.targetForRequest(""); targetErr == nil {
-				if _, dt := s.session.Load().GetShareState(); dt != "" {
-					if err := share.UnpublishFromWeb(target.URL, dt, target.Auth.Token); err != nil {
-						w.Header().Set("Content-Type", "application/json")
-						w.WriteHeader(http.StatusBadGateway)
-						json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
-						return
-					}
+			target, targetErr := s.targetForRequest("")
+			if targetErr != nil {
+				http.Error(w, targetErr.Error(), http.StatusBadRequest)
+				return
+			}
+			if _, dt := s.session.Load().GetShareState(); dt != "" {
+				if err := share.UnpublishFromWeb(target.URL, dt, target.Auth.Token); err != nil {
+					w.Header().Set("Content-Type", "application/json")
+					w.WriteHeader(http.StatusBadGateway)
+					json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
+					return
 				}
 			}
 		}
@@ -1003,7 +1064,7 @@ func (s *Server) handleShareURL(w http.ResponseWriter, r *http.Request) { //noli
 // button path (handleShare) and the proxy-auth relay (handlePreviewPayload).
 func (s *Server) shareFilesForSession() (files []ShareFile, reviewType string, err error) {
 	sess := s.session.Load()
-	if sess != nil && sess.ReviewType == "preview" {
+	if sess.ReviewType == "preview" {
 		files, err = session.CrawlPreview(sess.Origin, s.previewEntryPath(sess))
 		if err != nil {
 			return nil, "", fmt.Errorf("crawling preview assets: %w", err)
@@ -1474,8 +1535,11 @@ func (s *Server) handleShareReshare(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	// Non-fatal if local hash/round persistence fails — remote upsert already succeeded.
-	_ = share.UpdateShareState(sess.CritJSONPath(), files, comments, result.ReviewRound, result.Sent)
-	sess.SyncCommentsFromDisk()
+	if _, err := sess.ApplyReviewFileUpdate(func() error {
+		return share.UpdateShareState(sess.CritJSONPath(), files, comments, result.ReviewRound, result.Sent)
+	}); err != nil {
+		log.Printf("Warning: saving share state after re-share: %v", err)
+	}
 
 	writeJSON(w, map[string]any{
 		"url":             result.URL,
@@ -1544,8 +1608,7 @@ func (s *Server) writeJSONError(w http.ResponseWriter, status int, msg string) {
 
 // pullAndMergeRemoteComments is the shared pull+merge used by /api/share/pull
 // and the first half of /api/share/reshare. Returns merged/replies_updated
-// counts. Caller must SyncCommentsFromDisk if they need a fresh in-memory view
-// after a successful merge (pull does; reshare does after upsert).
+// counts. A successful merge is already loaded into the session.
 func (s *Server) pullAndMergeRemoteComments() (merged, repliesUpdated int, err error) {
 	sess := s.session.Load()
 	hostedURL := sess.GetSharedURL()
@@ -1588,10 +1651,12 @@ func (s *Server) pullAndMergeRemoteComments() (merged, repliesUpdated int, err e
 		return 0, 0, nil
 	}
 	rekeyPulledPreviewComments(sess, fetched.NewComments)
-	if err := share.MergeFetchedComments(critPath, fetched); err != nil {
+	if _, err := sess.ApplyReviewFileUpdate(func() error {
+		_, _, daemonFocus := sess.PickerContext()
+		return share.MergeFetchedCommentsFor(critPath, fetched, &daemonFocus)
+	}); err != nil {
 		return 0, 0, err
 	}
-	sess.SyncCommentsFromDisk()
 	return len(fetched.NewComments), len(fetched.ReplyUpdates), nil
 }
 
@@ -1712,17 +1777,19 @@ func (s *Server) handleMergeComments(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, map[string]any{"merged": 0, "replies_updated": 0})
 		return
 	}
-	if err := mergeWebComments(critPath, newComments, replyUpdates); err != nil {
+	// mergeWebComments writes review.json outside WriteFiles. Run it between
+	// a flush and a reload so a debounced save cannot overwrite it, and so
+	// /api/file/comments and the UI see pulled comments without waiting for
+	// the 1s file watcher tick (which can also miss same-second mtime updates).
+	if _, err := sess.ApplyReviewFileUpdate(func() error {
+		_, _, daemonFocus := sess.PickerContext()
+		return share.MergeWebCommentsFor(critPath, newComments, replyUpdates, &daemonFocus)
+	}); err != nil {
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusInternalServerError)
 		json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
 		return
 	}
-	// mergeWebComments writes review.json outside WriteFiles; sync in-memory
-	// state immediately so /api/file/comments and the UI refresh path see
-	// pulled comments without waiting for the 1s file watcher tick (which can
-	// also miss same-second mtime updates).
-	sess.SyncCommentsFromDisk()
 	writeJSON(w, map[string]any{"merged": len(newComments), "replies_updated": len(replyUpdates)})
 }
 
@@ -2498,6 +2565,7 @@ func (s *Server) handleRoundComplete(w http.ResponseWriter, r *http.Request) {
 		})
 		return
 	}
+	sess.TakePendingFinish()
 	sess.SignalRoundComplete()
 	writeJSON(w, map[string]string{"status": "ok"})
 }
@@ -2516,7 +2584,9 @@ func (s *Server) handleFocus(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "Bad request: "+err.Error(), http.StatusBadRequest)
 		return
 	}
-	if err := s.session.Load().SetFocus(req); err != nil {
+	sess := s.session.Load()
+	// A range picked at the branch tip follows HEAD from round to round.
+	if err := sess.SetFocus(sess.WithHeadRefAtTip(req)); err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
@@ -2529,7 +2599,7 @@ func (s *Server) handleFinish(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if s.projectPromptsUntrusted() {
+	if _, _, trust := s.loadPromptConfig(); trust.Untrusted {
 		http.Error(w, "project prompt trust required", http.StatusForbidden)
 		return
 	}
@@ -2553,7 +2623,10 @@ func (s *Server) handleFinish(w http.ResponseWriter, r *http.Request) {
 	if unresolvedComments > 0 {
 		comments = listUnresolvedComments(sess)
 	}
-	prompt, promptMeta := s.renderFinishPrompts(sess, approved, stats)
+	finish, ok := s.renderFinishPrompt(w, sess, approved, stats)
+	if !ok {
+		return
+	}
 	nextCommand := session.NextRoundCommand(sess)
 	if !approved {
 		sess.SetWaitingForAgent(true)
@@ -2570,12 +2643,12 @@ func (s *Server) handleFinish(w http.ResponseWriter, r *http.Request) {
 	// as soon as the approved finish response has been processed.
 	finishResp := map[string]any{
 		"status":       "finished",
-		"prompt":       prompt,
+		"prompt":       finish.Prompt,
 		"approved":     approved,
 		"comments":     comments,
 		"next_command": nextCommand,
 		"stats":        stats,
-		"prompt_meta":  promptMeta,
+		"prompt_meta":  finish.Meta,
 	}
 	if ms, enabled := s.cfg.CloseOnApproveAfterMsEnabled(); enabled {
 		finishResp["close_on_approve_after_ms"] = ms
@@ -2588,17 +2661,22 @@ func (s *Server) handleFinish(w http.ResponseWriter, r *http.Request) {
 	// clients can extract it without string matching on the prompt.
 	// Mirror the finish response so review-cycle consumers see the same fields.
 	eventDataMap := map[string]any{
-		"prompt":       prompt,
+		"prompt":       finish.Prompt,
 		"approved":     approved,
 		"stats":        stats,
 		"comments":     comments,
 		"next_command": nextCommand,
-		"prompt_meta":  promptMeta,
+		"prompt_meta":  finish.Meta,
 	}
 	if ms, enabled := s.cfg.CloseOnApproveAfterMsEnabled(); enabled {
 		eventDataMap["close_on_approve_after_ms"] = ms
 	}
 	eventData, _ := json.Marshal(eventDataMap)
+	if s.cfg.AgentInstantReplies {
+		// Kept until a review-cycle consumes it: an agent busy with a live
+		// delivery is not subscribed and would miss the event.
+		sess.SetPendingFinish(string(eventData))
+	}
 	sess.Notify(SSEEvent{
 		Type:    "finish",
 		Content: string(eventData),
@@ -2737,9 +2815,17 @@ func (s *Server) handleReviewCycle(w http.ResponseWriter, r *http.Request) {
 	// A plan hook starts the next round when the agent submits the plan
 	// again. While it waits, the finish prompt says that instead of
 	// `crit plan --name`.
-	if planHook := planHookParam(r, sess); planHook != "" {
+	planHook := planHookParam(r, sess)
+	live := planHook == "" && s.cfg.AgentInstantReplies
+	if planHook != "" {
 		sess.SetPlanHook(planHook)
 		defer sess.SetPlanHook("")
+	}
+	if live {
+		// Registered before Subscribe so a caller that sees the subscriber
+		// also sees the listener; a request queued in between is drained below.
+		sess.AgentListenerEnter()
+		defer sess.AgentListenerExit()
 	}
 
 	// Subscribe BEFORE round-complete to avoid missing the finish event
@@ -2748,44 +2834,51 @@ func (s *Server) handleReviewCycle(w http.ResponseWriter, r *http.Request) {
 	ch := sess.Subscribe()
 	defer sess.Unsubscribe(ch)
 
-	if !sess.IsAwaitingFirstReview() {
+	// After a live delivery the agent comes back mid-round: completing the
+	// round would clear the reviewer's open forms.
+	afterLiveDelivery := live && sess.TakeLastCycleLive()
+	roundCompleted := false
+	if !sess.IsAwaitingFirstReview() && !afterLiveDelivery {
+		// A kept Finish belongs to the round this call completes; the agent
+		// has handled that round, so the Finish is stale.
+		sess.TakePendingFinish()
+		// A --range review whose head is HEAD (or a branch) shows the commit
+		// the agent is at now, not the one it was at when the daemon started.
+		if oldHead, newHead, err := sess.FollowRangeHead(); err != nil {
+			fmt.Fprintf(os.Stderr, "Warning: range head not updated: %v\n", err)
+		} else if newHead != "" {
+			fmt.Fprintf(os.Stderr, "Range head moved: %.7s -> %.7s\n", oldHead, newHead)
+		}
 		// Agent finished changes — signal round-complete so browser refreshes
 		sess.SignalRoundComplete()
+		roundCompleted = true
+	} else if live {
+		if content, ok := sess.TakePendingFinish(); ok {
+			s.writeCycleFinish(w, sess, content)
+			return
+		}
+	}
+	// Completing the round clears the in-memory comments until the watcher
+	// carries them forward ("file-changed" session); queued requests wait
+	// for that instead of being dropped as unknown comments.
+	awaitingCarryForward := roundCompleted
+	if live && !awaitingCarryForward && s.writeLiveDelivery(w, sess) {
+		return
 	}
 
 	for {
 		select {
 		case event := <-ch:
 			if event.Type == "finish" {
-				sess.SetAwaitingFirstReview(false)
-				// Parse the structured finish event data
-				var finishData struct {
-					Prompt                string                  `json:"prompt"`
-					Approved              bool                    `json:"approved"`
-					Stats                 map[string]any          `json:"stats"`
-					Comments              []comment.ListedComment `json:"comments"`
-					PromptMeta            *prompt.Meta            `json:"prompt_meta"`
-					NextCommand           string                  `json:"next_command"`
-					CloseOnApproveAfterMs *int                    `json:"close_on_approve_after_ms"`
-				}
-				json.Unmarshal([]byte(event.Content), &finishData)
-				nextCommand := finishData.NextCommand
-				if nextCommand == "" {
-					nextCommand = session.NextRoundCommand(sess)
-				}
-				cycleResp := map[string]any{
-					"status":       "finished",
-					"prompt":       finishData.Prompt,
-					"approved":     finishData.Approved,
-					"comments":     finishData.Comments,
-					"stats":        finishData.Stats,
-					"next_command": nextCommand,
-					"prompt_meta":  finishData.PromptMeta,
-				}
-				if finishData.CloseOnApproveAfterMs != nil {
-					cycleResp["close_on_approve_after_ms"] = *finishData.CloseOnApproveAfterMs
-				}
-				writeJSON(w, cycleResp)
+				sess.TakePendingFinish()
+				s.writeCycleFinish(w, sess, event.Content)
+				return
+			}
+			if event.Type == "file-changed" && event.Content == "session" {
+				awaitingCarryForward = false
+			}
+			if (event.Type == "agent-request" || event.Type == "file-changed") &&
+				live && !awaitingCarryForward && s.writeLiveDelivery(w, sess) {
 				return
 			}
 			if event.Type == "server-shutdown" {
@@ -2835,6 +2928,7 @@ func (s *Server) handleWaitForEvent(w http.ResponseWriter, r *http.Request) {
 		select {
 		case event := <-ch:
 			if event.Type == "finish" {
+				sess.TakePendingFinish()
 				writeJSON(w, event)
 				return
 			}
@@ -3221,15 +3315,18 @@ func agentName(cmd string) string {
 	return filepath.Base(parts[0])
 }
 
-// handleAgentRequest dispatches a comment to the configured agent command.
+// handleAgentRequest sends a comment to the agent waiting on the review
+// (review-cycle) when one exists — it has the conversation's context — and
+// otherwise to the configured agent command.
 // POST /api/agent/request
 func (s *Server) handleAgentRequest(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
-	if s.agentCmd == "" {
-		http.Error(w, "agent_cmd not configured", http.StatusBadRequest)
+	toWaitingAgent := s.cfg.AgentInstantReplies && s.session.Load().AgentLoopActive(time.Now())
+	if !toWaitingAgent && s.agentCmd == "" {
+		http.Error(w, "no agent: none is waiting on the review and agent_cmd is not configured", http.StatusBadRequest)
 		return
 	}
 
@@ -3252,6 +3349,19 @@ func (s *Server) handleAgentRequest(w http.ResponseWriter, r *http.Request) {
 		}
 		filePath = ""
 		sess.SetReviewCommentLive(comment.ID)
+	}
+
+	if toWaitingAgent {
+		sess.EnqueueAgentRequest(session.AgentRequest{CommentID: comment.ID, FilePath: filePath})
+		writeJSONStatus(w, http.StatusAccepted, map[string]any{
+			"status":     "queued",
+			"comment_id": body.CommentID,
+			"file_path":  filePath,
+		})
+		return
+	}
+	if s.cfg.AgentInstantReplies {
+		sess.SetCommentAgentStatus(filePath, comment.ID, session.AgentStateDelivered, 0)
 	}
 
 	prompt := buildAgentPrompt(comment, filePath)
@@ -3384,11 +3494,15 @@ func (s *Server) runAgentCmd(prompt string, commentID string, filePath string) {
 			return
 		default:
 		}
-		// Re-read content (and file list/diffs in git mode) so next fetch returns updated data
-		sess.RefreshFileContent()
+		// Re-read content (and file list/diffs in git mode) so next fetch returns
+		// updated data. Git mode leaves content alone: the browser still shows
+		// the text it loaded and comments anchor to it; the next live session
+		// fetch syncs content and moves comments together (SyncWorkingTree).
 		if sess.Mode == "git" {
 			sess.RefreshFileList()
 			sess.RefreshDiffs()
+		} else {
+			sess.RefreshFileContent()
 		}
 		sess.Notify(SSEEvent{Type: "comments-changed"})
 	}

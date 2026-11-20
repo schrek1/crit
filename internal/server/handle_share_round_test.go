@@ -184,6 +184,65 @@ func TestShareCLIArgsForSession_NilAndPreviewWithoutOrigin(t *testing.T) {
 	}
 }
 
+// Sharing a canvas preview crawls the scene into canvas HTML + assets and
+// reaches crit-web (direct Share) or returns that payload (proxy relay).
+func TestShare_ExcalidrawCanvasPreviewPayload(t *testing.T) {
+	testutil.SetHome(t, t.TempDir())
+	dir := t.TempDir()
+	scene := filepath.Join(dir, "arch.excalidraw")
+	if err := os.WriteFile(scene, []byte(`{"type":"excalidraw","elements":[]}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	var posted bool
+	critWeb := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		posted = true
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"url":"http://example.test/r/tok","token":"tok"}`))
+	}))
+	defer critWeb.Close()
+
+	sess := &Session{
+		Mode: "files", ReviewType: "preview", RepoRoot: dir, OutputDir: dir, Origin: scene, ReviewRound: 1,
+		Files: []*FileEntry{{Path: "arch.excalidraw", AbsPath: scene, FileType: "code", Content: `{"type":"excalidraw","elements":[]}`}},
+	}
+	sess.InitTestChannels()
+	s, err := NewServer(sess, frontendFS, critWeb.URL, false, "", "", "test", 0, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	s.authMu.Lock()
+	s.cfg.ShareConsented = true
+	s.authMu.Unlock()
+
+	w := httptest.NewRecorder()
+	s.ServeHTTP(w, httptest.NewRequest(http.MethodGet, "/api/share/preview-payload", nil))
+	if w.Code != http.StatusOK {
+		t.Fatalf("preview-payload = %d %s", w.Code, w.Body.String())
+	}
+	var payload map[string]any
+	if err := json.Unmarshal(w.Body.Bytes(), &payload); err != nil {
+		t.Fatal(err)
+	}
+	files, _ := payload["files"].([]any)
+	if len(files) < 5 {
+		t.Fatalf("payload files = %d, want canvas + assets", len(files))
+	}
+	first, _ := files[0].(map[string]any)
+	content, _ := first["content"].(string)
+	if !strings.Contains(content, `id="crit-excalidraw-scene"`) {
+		t.Fatal("payload entry is not canvas HTML")
+	}
+
+	w = httptest.NewRecorder()
+	s.ServeHTTP(w, httptest.NewRequest(http.MethodPost, "/api/share", nil))
+	if w.Code != http.StatusOK {
+		t.Fatalf("share = %d %s", w.Code, w.Body.String())
+	}
+	if !posted {
+		t.Fatal("direct share did not POST to crit-web")
+	}
+}
+
 func newPreviewReshareTestServer(t *testing.T) (*Server, *Session, string) {
 	t.Helper()
 	dir := t.TempDir()
@@ -301,7 +360,7 @@ func TestHandleShare_AlreadyShared(t *testing.T) {
 	defer critWeb.Close()
 
 	s, sess := newShareTestServer(t, critWeb.URL, true)
-	sess.SetSharedURLAndToken(critWeb.URL+"/r/existing", "tok_existing")
+	sess.SetSharedTarget(critWeb.URL+"/r/existing", critWeb.URL, "tok_existing")
 	req := httptest.NewRequest(http.MethodPost, "/api/share", nil)
 	w := httptest.NewRecorder()
 	s.ServeHTTP(w, req)
@@ -344,7 +403,7 @@ func TestHandleShare_ExistingShareServiceError(t *testing.T) {
 	defer critWeb.Close()
 
 	s, sess := newShareTestServer(t, critWeb.URL, true)
-	sess.SetSharedURLAndToken(critWeb.URL+"/r/existing", "tok_existing")
+	sess.SetSharedTarget(critWeb.URL+"/r/existing", critWeb.URL, "tok_existing")
 
 	req := httptest.NewRequest(http.MethodPost, "/api/share", nil)
 	w := httptest.NewRecorder()
@@ -476,7 +535,7 @@ func TestHandleSharePull_MergesRemoteComments(t *testing.T) {
 	s.authMu.Lock()
 	s.authToken = "tok_test_bearer"
 	s.authMu.Unlock()
-	sess.SetSharedURLAndToken(critWeb.URL+"/r/abc123", "delete-tok")
+	sess.SetSharedTarget(critWeb.URL+"/r/abc123", critWeb.URL, "delete-tok")
 
 	req := httptest.NewRequest(http.MethodPost, "/api/share/pull", nil)
 	w := httptest.NewRecorder()
@@ -541,7 +600,7 @@ func TestHandleShareReshare_PullsAndUpserts(t *testing.T) {
 	s.authMu.Lock()
 	s.authToken = "tok_reshare"
 	s.authMu.Unlock()
-	sess.SetSharedURLAndToken(critWeb.URL+"/r/abc123", "delete-tok")
+	sess.SetSharedTarget(critWeb.URL+"/r/abc123", critWeb.URL, "delete-tok")
 
 	req := httptest.NewRequest(http.MethodPost, "/api/share/reshare", nil)
 	w := httptest.NewRecorder()
@@ -572,7 +631,7 @@ func TestHandleShareURL_LocalOnlySkipsRemoteDelete(t *testing.T) {
 	defer critWeb.Close()
 
 	s, sess := newShareTestServer(t, critWeb.URL, true)
-	sess.SetSharedURLAndToken(critWeb.URL+"/r/abc", "delete-tok")
+	sess.SetSharedTarget(critWeb.URL+"/r/abc", critWeb.URL, "delete-tok")
 
 	req := httptest.NewRequest(http.MethodDelete, "/api/share-url?local_only=1", nil)
 	w := httptest.NewRecorder()
@@ -600,7 +659,7 @@ func TestHandleSharePull_Unauthorized(t *testing.T) {
 	s.authMu.Lock()
 	s.authToken = "bad"
 	s.authMu.Unlock()
-	sess.SetSharedURLAndToken(critWeb.URL+"/r/abc123", "delete-tok")
+	sess.SetSharedTarget(critWeb.URL+"/r/abc123", critWeb.URL, "delete-tok")
 
 	req := httptest.NewRequest(http.MethodPost, "/api/share/pull", nil)
 	w := httptest.NewRecorder()
@@ -618,7 +677,7 @@ func TestHandleSharePull_NotFound(t *testing.T) {
 	defer critWeb.Close()
 
 	s, sess := newShareTestServer(t, critWeb.URL, true)
-	sess.SetSharedURLAndToken(critWeb.URL+"/r/gone", "delete-tok")
+	sess.SetSharedTarget(critWeb.URL+"/r/gone", critWeb.URL, "delete-tok")
 
 	req := httptest.NewRequest(http.MethodPost, "/api/share/pull", nil)
 	w := httptest.NewRecorder()
@@ -635,7 +694,7 @@ func TestHandleSharePull_NoNewComments(t *testing.T) {
 	defer critWeb.Close()
 
 	s, sess := newShareTestServer(t, critWeb.URL, true)
-	sess.SetSharedURLAndToken(critWeb.URL+"/r/abc123", "delete-tok")
+	sess.SetSharedTarget(critWeb.URL+"/r/abc123", critWeb.URL, "delete-tok")
 
 	req := httptest.NewRequest(http.MethodPost, "/api/share/pull", nil)
 	w := httptest.NewRecorder()
@@ -670,7 +729,7 @@ func TestHandleShareReshare_SoftFailsPullThenUpserts(t *testing.T) {
 	defer critWeb.Close()
 
 	s, sess := newShareTestServer(t, critWeb.URL, true)
-	sess.SetSharedURLAndToken(critWeb.URL+"/r/abc123", "delete-tok")
+	sess.SetSharedTarget(critWeb.URL+"/r/abc123", critWeb.URL, "delete-tok")
 
 	req := httptest.NewRequest(http.MethodPost, "/api/share/reshare", nil)
 	w := httptest.NewRecorder()
@@ -695,7 +754,7 @@ func TestHandleShareReshare_FatalUnauthorizedPull(t *testing.T) {
 	defer critWeb.Close()
 
 	s, sess := newShareTestServer(t, critWeb.URL, true)
-	sess.SetSharedURLAndToken(critWeb.URL+"/r/abc123", "delete-tok")
+	sess.SetSharedTarget(critWeb.URL+"/r/abc123", critWeb.URL, "delete-tok")
 
 	req := httptest.NewRequest(http.MethodPost, "/api/share/reshare", nil)
 	w := httptest.NewRecorder()
@@ -729,6 +788,48 @@ func TestHandleShareReshare_MethodNotAllowed(t *testing.T) {
 	}
 }
 
+func TestHandleShareURL_DeleteTargetErrorKeepsToken(t *testing.T) {
+	remoteHits := 0
+	critWeb := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		remoteHits++
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer critWeb.Close()
+
+	s, sess := newShareTestServer(t, critWeb.URL, true)
+	// Bound base is no longer one of the server's configured targets.
+	sess.SetSharedTarget("https://a.example/r/tok", "https://a.example", "delete-tok")
+
+	req := httptest.NewRequest(http.MethodDelete, "/api/share-url", nil)
+	w := httptest.NewRecorder()
+	s.ServeHTTP(w, req)
+	if w.Code == http.StatusNoContent {
+		t.Fatal("status = 204; unresolved target must not clear share state")
+	}
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400, body = %s", w.Code, w.Body.String())
+	}
+	if url, token := sess.GetShareState(); url != "https://a.example/r/tok" || token != "delete-tok" {
+		t.Fatalf("share state = %q %q, want URL and delete token kept", url, token)
+	}
+	if remoteHits != 0 {
+		t.Fatalf("remote hits = %d, want 0", remoteHits)
+	}
+
+	req = httptest.NewRequest(http.MethodDelete, "/api/share-url?local_only=1", nil)
+	w = httptest.NewRecorder()
+	s.ServeHTTP(w, req)
+	if w.Code != http.StatusNoContent {
+		t.Fatalf("local_only status = %d, want 204", w.Code)
+	}
+	if url, token := sess.GetShareState(); url != "" || token != "" {
+		t.Fatalf("local_only share state = %q %q, want cleared", url, token)
+	}
+	if remoteHits != 0 {
+		t.Fatalf("local_only remote hits = %d, want 0", remoteHits)
+	}
+}
+
 func TestHandleShareURL_DeleteUnpublishesRemotely(t *testing.T) {
 	var gotMethod, gotPath, gotAuth string
 	critWeb := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -741,7 +842,7 @@ func TestHandleShareURL_DeleteUnpublishesRemotely(t *testing.T) {
 	s.authMu.Lock()
 	s.authToken = "tok_del"
 	s.authMu.Unlock()
-	sess.SetSharedURLAndToken(critWeb.URL+"/r/abc", "delete-tok")
+	sess.SetSharedTarget(critWeb.URL+"/r/abc", critWeb.URL, "delete-tok")
 
 	req := httptest.NewRequest(http.MethodDelete, "/api/share-url", nil)
 	w := httptest.NewRecorder()
@@ -775,7 +876,7 @@ func TestHandleShareReshare_UpsertUnauthorized(t *testing.T) {
 	defer critWeb.Close()
 
 	s, sess := newShareTestServer(t, critWeb.URL, true)
-	sess.SetSharedURLAndToken(critWeb.URL+"/r/abc123", "delete-tok")
+	sess.SetSharedTarget(critWeb.URL+"/r/abc123", critWeb.URL, "delete-tok")
 
 	req := httptest.NewRequest(http.MethodPost, "/api/share/reshare", nil)
 	w := httptest.NewRecorder()
@@ -793,7 +894,7 @@ func TestHandleShareReshare_NotFoundOnPull(t *testing.T) {
 	defer critWeb.Close()
 
 	s, sess := newShareTestServer(t, critWeb.URL, true)
-	sess.SetSharedURLAndToken(critWeb.URL+"/r/gone", "delete-tok")
+	sess.SetSharedTarget(critWeb.URL+"/r/gone", critWeb.URL, "delete-tok")
 
 	req := httptest.NewRequest(http.MethodPost, "/api/share/reshare", nil)
 	w := httptest.NewRecorder()
@@ -811,7 +912,7 @@ func TestHandleShareURL_DeleteRemoteFailure(t *testing.T) {
 	defer critWeb.Close()
 
 	s, sess := newShareTestServer(t, critWeb.URL, true)
-	sess.SetSharedURLAndToken(critWeb.URL+"/r/abc", "delete-tok")
+	sess.SetSharedTarget(critWeb.URL+"/r/abc", critWeb.URL, "delete-tok")
 
 	req := httptest.NewRequest(http.MethodDelete, "/api/share-url", nil)
 	w := httptest.NewRecorder()
@@ -832,7 +933,7 @@ func TestHandleSharePull_MissingReviewFile(t *testing.T) {
 	defer critWeb.Close()
 
 	s, sess := newShareTestServer(t, critWeb.URL, true)
-	sess.SetSharedURLAndToken(critWeb.URL+"/r/abc123", "delete-tok")
+	sess.SetSharedTarget(critWeb.URL+"/r/abc123", critWeb.URL, "delete-tok")
 	// Remove the seeded review file so pullAndMergeRemoteComments hits the
 	// missing-file branch.
 	reviewPath := filepath.Join(sess.OutputDir, ".crit", "review.json")
@@ -859,7 +960,7 @@ func TestHandleShareReshare_EmptyFiles(t *testing.T) {
 	defer critWeb.Close()
 
 	s, sess := newShareTestServer(t, critWeb.URL, true)
-	sess.SetSharedURLAndToken(critWeb.URL+"/r/abc123", "delete-tok")
+	sess.SetSharedTarget(critWeb.URL+"/r/abc123", critWeb.URL, "delete-tok")
 	// Clear session files so reshareUpsertInputs returns errNoFilesInSession.
 	sess.Files = nil
 
@@ -929,7 +1030,7 @@ func TestHandleSharePull_PlacementSkipsLocallyMovedComment(t *testing.T) {
 			defer critWeb.Close()
 
 			s, sess := newShareTestServer(t, critWeb.URL, true)
-			sess.SetSharedURLAndToken(critWeb.URL+"/r/abc123", "delete-tok")
+			sess.SetSharedTarget(critWeb.URL+"/r/abc123", critWeb.URL, "delete-tok")
 			cj := readShareTestReview(t, sess)
 			cj.SharedLines = map[string]session.SharedLine{"c1": {StartLine: tc.sharedLine, EndLine: tc.sharedLine}}
 			writeShareTestReview(t, sess, cj)
@@ -1010,7 +1111,7 @@ func TestHandleShare_RecordsSharedLines(t *testing.T) {
 // payload are recorded only when POST /api/share-url confirms the upload.
 func TestHandleShareURL_RecordsRelayPayloadLines(t *testing.T) {
 	s, sess := newShareTestServer(t, "https://crit.example", true)
-	sess.SetSharedURLAndToken("https://crit.example/r/abc123", "delete-tok")
+	sess.SetSharedTarget("https://crit.example/r/abc123", "https://crit.example", "delete-tok")
 
 	w := httptest.NewRecorder()
 	s.ServeHTTP(w, httptest.NewRequest(http.MethodGet, "/api/share/upsert-payload", nil))

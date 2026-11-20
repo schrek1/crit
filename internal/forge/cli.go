@@ -3,6 +3,7 @@ package forge
 import (
 	"context"
 	"fmt"
+	"strconv"
 	"strings"
 
 	"github.com/tomasz-tomczyk/crit/internal/daemon"
@@ -66,24 +67,80 @@ func RunPush(args []string) error {
 }
 
 // RunChange opens a GitHub PR or GitLab MR review through one neutral entrypoint.
+// With no argument it reviews the change request open for the current branch.
 func RunChange(kind Kind, args []string) error {
-	if len(args) != 1 {
-		noun := "pr"
-		identifier := "num"
-		if kind == GitLab {
-			noun = "mr"
-			identifier = "iid"
-		}
-		return fmt.Errorf("usage: crit %s <%s|url>", noun, identifier)
+	flag, noun, identifier := "--pr", "pr", "num"
+	if kind == GitLab {
+		flag, noun, identifier = "--mr", "mr", "iid"
+	}
+	if len(args) > 1 {
+		return fmt.Errorf("usage: crit %s [%s|url]", noun, identifier)
 	}
 	if ReviewFn == nil {
 		return fmt.Errorf("forge review command is not wired")
 	}
-	flag := "--pr"
-	if kind == GitLab {
-		flag = "--mr"
+	if len(args) == 0 {
+		spec, err := detectChangeSpec(kind)
+		if err != nil {
+			return err
+		}
+		args = []string{spec}
 	}
 	return ReviewFn([]string{flag, args[0]})
+}
+
+// ResolveBareChangeFlags fills in --pr/--mr when given without a value, using
+// the change request open for the current branch (like `gh pr view`). Doing
+// this in the client means the daemon only ever sees a concrete number.
+func ResolveBareChangeFlags(args []string) ([]string, error) {
+	out := make([]string, 0, len(args))
+	for i := 0; i < len(args); i++ {
+		arg := args[i]
+		if arg == "--" {
+			return append(out, args[i:]...), nil
+		}
+		kind, name, withEquals, ok := changeFlag(arg)
+		if !ok || (!withEquals && i+1 < len(args) && !strings.HasPrefix(args[i+1], "-")) {
+			out = append(out, arg)
+			continue
+		}
+		spec, err := detectChangeSpec(kind)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, name, spec)
+	}
+	return out, nil
+}
+
+// changeFlag recognizes --pr/--mr (single dash too) and the empty "--pr=" form.
+func changeFlag(arg string) (kind Kind, name string, withEquals, ok bool) {
+	name = strings.TrimSuffix(arg, "=")
+	withEquals = name != arg
+	switch name {
+	case "--pr", "-pr":
+		return GitHub, name, withEquals, true
+	case "--mr", "-mr":
+		return GitLab, name, withEquals, true
+	}
+	return "", "", false, false
+}
+
+// detectChangeSpec returns the number of the change request for the current branch.
+func detectChangeSpec(kind Kind) (string, error) {
+	provider, err := selectProvider(kind)
+	if err != nil {
+		return "", err
+	}
+	ctx := context.Background()
+	if err := provider.RequireAuth(ctx, RepoContext{}); err != nil {
+		return "", err
+	}
+	id, err := provider.Detect(ctx, RepoContext{})
+	if err != nil {
+		return "", err
+	}
+	return strconv.Itoa(id.Number), nil
 }
 
 func selectProvider(kind Kind) (Provider, error) {
@@ -143,6 +200,8 @@ func parsePullRequest(args []string) (PullRequest, error) {
 	var request PullRequest
 	for i := 0; i < len(args); i++ {
 		switch args[i] {
+		case "--viewed":
+			request.Viewed = true
 		case "--output", "-o":
 			val, next, err := requireFlagValue(args, i)
 			if err != nil {
@@ -159,7 +218,7 @@ func parsePullRequest(args []string) (PullRequest, error) {
 			request.SessionID = id
 		default:
 			if request.ChangeSpec != "" {
-				return request, fmt.Errorf("usage: crit pull [--forge <provider>] [--session <id>] [--output <dir>] [number|url]")
+				return request, fmt.Errorf("usage: crit pull [--forge <provider>] [--session <id>] [--viewed] [--output <dir>] [number|url]")
 			}
 			request.ChangeSpec = args[i]
 		}
@@ -167,12 +226,25 @@ func parsePullRequest(args []string) (PullRequest, error) {
 	return request, nil
 }
 
+func setPushBoolFlag(request *PushRequest, arg string) bool {
+	switch arg {
+	case "--dry-run":
+		request.DryRun = true
+	case "--viewed":
+		request.Viewed = true
+	default:
+		return false
+	}
+	return true
+}
+
 func parsePushRequest(args []string) (PushRequest, error) {
 	request := PushRequest{Event: "comment"}
 	for i := 0; i < len(args); i++ {
+		if setPushBoolFlag(&request, args[i]) {
+			continue
+		}
 		switch args[i] {
-		case "--dry-run":
-			request.DryRun = true
 		case "--message", "-m":
 			val, next, err := requireFlagValue(args, i)
 			if err != nil {

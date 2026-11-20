@@ -68,7 +68,8 @@
           var renderCommentMarkdown = commentMd.render.bind(commentMd);
           commentMd.render = function (src, env) {
             src = window.crit.commentHtml.normalizeCommentMarkdown(src);
-            return window.crit.commentHtml.sanitize(renderCommentMarkdown(src, env));
+            // Remote images become click-to-load placeholders.
+            return window.crit.remoteImages.rewriteHtml(window.crit.commentHtml.sanitize(renderCommentMarkdown(src, env)));
           };
         }
       } catch (_) {}
@@ -353,7 +354,12 @@
           var sig = commentSignature(c, isPin, reviewRound);
           var existing = _cardEntries.get(idStr);
           var wrapper;
-          if (existing && existing.sig === sig && existing.route === route && existing.isPin === isPin) {
+          // The inline reply editor lives only in the DOM, so a rebuild would
+          // discard it and its text. Keep the card until the editor closes:
+          // entry.sig stays old, so the next render picks up what changed.
+          var keepForEditor = existing && existing.wrapper.querySelector &&
+            existing.wrapper.querySelector('.crit-live-reply-edit-textarea');
+          if (existing && (existing.sig === sig || keepForEditor) && existing.route === route && existing.isPin === isPin) {
             // Reuse the live DOM node — the most important branch for the
             // focus/scroll preservation contract. Any focused element
             // inside this wrapper stays focused, since we never detach the

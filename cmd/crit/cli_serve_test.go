@@ -4,12 +4,36 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 
 	"github.com/tomasz-tomczyk/crit/internal/server"
+	"github.com/tomasz-tomczyk/crit/internal/session"
 	"github.com/tomasz-tomczyk/crit/internal/testutil"
 )
+
+func TestCheckServeLiveCookies(t *testing.T) {
+	tests := []struct {
+		name    string
+		config  server.DaemonCLIConfig
+		wantErr bool
+	}{
+		{"loopback", server.DaemonCLIConfig{Host: "127.0.0.1", LiveOrigin: "http://app", LiveCookie: "session=1"}, false},
+		{"network host", server.DaemonCLIConfig{Host: "100.64.0.6", LiveOrigin: "http://app", LiveCookie: "session=1"}, true},
+		{"public URL", server.DaemonCLIConfig{Host: "127.0.0.1", PublicURL: "http://box.example", LiveOrigin: "http://app", LiveCookie: "session=1"}, true},
+		{"public URL without cookie", server.DaemonCLIConfig{Host: "127.0.0.1", PublicURL: "http://box.example", LiveOrigin: "http://app"}, false},
+		{"non-live daemon", server.DaemonCLIConfig{Host: "100.64.0.6", LiveCookie: "session=1"}, false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := checkServeLiveCookies(&tt.config)
+			if (err != nil) != tt.wantErr {
+				t.Errorf("checkServeLiveCookies() error = %v, wantErr %v", err, tt.wantErr)
+			}
+		})
+	}
+}
 
 // TestPreflightCheck_CleanRepo verifies that running crit in a clean
 // repo with no changes returns the user-facing message instead of letting
@@ -212,5 +236,32 @@ func TestServeSessionKey_Override(t *testing.T) {
 	sc := &server.DaemonCLIConfig{SessionKeyOverride: "839f3b4cd5d6"}
 	if got := serveSessionKey(sc); got != "839f3b4cd5d6" {
 		t.Errorf("serveSessionKey() = %q", got)
+	}
+}
+
+func TestServeCLIArgs(t *testing.T) {
+	rangeFocus := &session.Focus{Kind: session.FocusRange, BaseSHA: "abc", HeadSHA: "def"}
+	followFocus := &session.Focus{Kind: session.FocusRange, BaseSHA: "abc", HeadSHA: "def", HeadRef: "HEAD"}
+	prFocus := &session.Focus{Kind: session.FocusRange, Forge: "github", ChangeNumber: 42, RemoteBaseProject: "o/r", BaseSHA: "abc", HeadSHA: "def"}
+	tests := []struct {
+		name string
+		sc   *server.DaemonCLIConfig
+		want []string
+	}{
+		{"git mode", &server.DaemonCLIConfig{}, nil},
+		{"files", &server.DaemonCLIConfig{Files: []string{"a.md", "b.md"}}, []string{"a.md", "b.md"}},
+		{"range", &server.DaemonCLIConfig{Focus: rangeFocus}, []string{"range:abc..def"}},
+		{"range following HEAD keeps the ref", &server.DaemonCLIConfig{Focus: followFocus}, []string{"range:abc..HEAD"}},
+		{"pr not recorded", &server.DaemonCLIConfig{Focus: prFocus}, nil},
+		{"live", &server.DaemonCLIConfig{LiveOrigin: "http://localhost:3000"}, []string{"live", "http://localhost:3000"}},
+		{"preview", &server.DaemonCLIConfig{PreviewFile: "/tmp/x.html"}, []string{"preview", "/tmp/x.html"}},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got := serveCLIArgs(tc.sc)
+			if !slices.Equal(got, tc.want) {
+				t.Fatalf("serveCLIArgs() = %q, want %q", got, tc.want)
+			}
+		})
 	}
 }

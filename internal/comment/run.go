@@ -25,6 +25,10 @@ func RunComment(args []string) error { //nolint:gocyclo // CLI dispatcher
 		return err
 	}
 
+	if f.status != "" {
+		return runCommentStatus(f)
+	}
+
 	var scope session.InheritedScope
 	if f.sessionEntry != nil {
 		scope, err = resolveCommentScopeAtPathWithFocus(f.scope, f.reviewPath, session.ProbeDaemonFocusForSession(*f.sessionEntry))
@@ -104,6 +108,12 @@ func resolveCommentFlags(f *commentFlags) error {
 	}
 	if f.route != "" && f.selector == "" {
 		return fmt.Errorf("--route requires --selector")
+	}
+	if f.status != "" && (f.json || f.replyTo != "" || f.selector != "") {
+		return fmt.Errorf("--status cannot be used with --json, --reply-to or --selector")
+	}
+	if f.timeout != "" && f.status == "" {
+		return fmt.Errorf("--timeout requires --status")
 	}
 	cfg, err := config.LoadCurrentConfig()
 	if err != nil {
@@ -291,6 +301,8 @@ func commentUsageError() error {
 	fmt.Fprintln(os.Stderr, "       crit comment [--session <id>] --reply-to <id> [--resolve] [--author <name>] <body>")
 	fmt.Fprintln(os.Stderr, "       crit comment [--session <id>] --json [--file <path>] [--author <name>] [--output <dir>]")
 	fmt.Fprintln(os.Stderr, "                                                                  Bulk add comments from JSON (stdin by default; --file <path> or --file - for stdin)")
+	fmt.Fprintln(os.Stderr, "       crit comment [--session <id>] --status seen|working [--timeout <duration>] <id>...")
+	fmt.Fprintln(os.Stderr, "                                                                  Report agent status on comments sent to the agent")
 	fmt.Fprintln(os.Stderr, "       crit comment [--output <dir>] --clear")
 	fmt.Fprintln(os.Stderr, "")
 	fmt.Fprintln(os.Stderr, "Examples:")

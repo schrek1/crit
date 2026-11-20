@@ -19,12 +19,23 @@
     return (typeof window !== 'undefined' && window.crit && window.crit.renderers) || null;
   }
 
+  // GitHub's slug (github-slugger), so in-document links written for GitHub
+  // resolve here too: every space becomes its own hyphen, nothing is collapsed
+  // or trimmed (`S7 — Data` → `s7--data`).
   function slugifyHeading(text) {
     return text
       .toLowerCase()
-      .replace(/[^\p{L}\p{N}\s-]/gu, '')
-      .replace(/[\s-]+/g, '-')
-      .replace(/^-+|-+$/g, '');
+      .replace(/[^\p{Alphabetic}\p{M}\p{Nd}\p{Pc} -]/gu, '')
+      .replace(/ /g, '-');
+  }
+
+  // The heading's text as rendered, which is what GitHub slugs: link text
+  // counts, link URLs and images do not.
+  function headingText(inline) {
+    return (inline.children || [])
+      .filter(function(child) { return child.type === 'text' || child.type === 'code_inline'; })
+      .map(function(child) { return child.content; })
+      .join('');
   }
 
   // Turn valid document frontmatter into a YAML fence without shifting maps.
@@ -67,6 +78,25 @@
         endLine: coveredUpTo + 1,
         html: lineText === '' ? '' : escapeHtml(lineText),
         isEmpty: lineText.trim() === ''
+      });
+      coveredUpTo++;
+    }
+    return coveredUpTo;
+  }
+
+  // Same as addGapLineBlocks, but for lines inside a blockquote's source range.
+  // A line there that belongs to no child token carries no rendered content: a
+  // bare ">" separating paragraphs, or a link reference definition. Render it
+  // as an empty quote so the quote reads as one block instead of leaking the
+  // escaped source (a literal ">"). The line keeps its own commentable block.
+  function addBlockquoteGapLineBlocks(blocks, sourceLines, coveredUpTo, upTo) {
+    while (coveredUpTo < upTo) {
+      var blank = sourceLines[coveredUpTo].trim() === '';
+      blocks.push({
+        startLine: coveredUpTo + 1,
+        endLine: coveredUpTo + 1,
+        html: blank ? '' : '<blockquote></blockquote>',
+        isEmpty: blank
       });
       coveredUpTo++;
     }
@@ -406,7 +436,7 @@
       var childMap = tokens[j].map;
       var childCloseIdx = j;
       if (tokens[j].nesting === 1) childCloseIdx = findCloseToken(tokens, j);
-      addGapLineBlocks(blocks, sourceLines, coveredUpTo, childMap[0]);
+      coveredUpTo = addBlockquoteGapLineBlocks(blocks, sourceLines, coveredUpTo, childMap[0]);
       var childTokens = tokens.slice(j, childCloseIdx + 1);
       var childHtml = '<blockquote>' +
         md.renderer.render(childTokens, md.options, {}) +
@@ -429,7 +459,7 @@
       coveredUpTo = blockEnd;
     }
 
-    coveredUpTo = addGapLineBlocks(blocks, sourceLines, coveredUpTo, blockEnd);
+    coveredUpTo = addBlockquoteGapLineBlocks(blocks, sourceLines, coveredUpTo, blockEnd);
     return { nextIndex: bqCloseIdx + 1, coveredUpTo: coveredUpTo };
   }
 
@@ -516,7 +546,8 @@
     handleListToken: handleListToken,
     handleTableToken: handleTableToken,
     handleBlockquoteToken: handleBlockquoteToken,
-    slugifyHeading: slugifyHeading
+    slugifyHeading: slugifyHeading,
+    headingText: headingText
   };
   if (typeof window !== 'undefined') {
     window.crit = window.crit || {};

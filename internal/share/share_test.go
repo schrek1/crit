@@ -1112,6 +1112,33 @@ func TestBuildSharePayload_WithStatusAndOrphaned(t *testing.T) {
 	}
 }
 
+// A `languages` override travels as lang and file_type on POST and PUT;
+// files without one omit both keys.
+func TestBuildSharePayload_LangAndFileType(t *testing.T) {
+	files := []ShareFile{
+		{Path: "app.conf", Content: "a: 1", Lang: "yaml", FileType: "code"},
+		{Path: "notes.md", Content: "# Hi"},
+	}
+	payloads := map[string]map[string]any{
+		"share":  buildSharePayload(files, nil, 1, nil, "", "", ""),
+		"upsert": BuildUpsertPayload(files, nil, "tok", 1, nil),
+	}
+	for name, payload := range payloads {
+		pFiles, ok := payload["files"].([]map[string]any)
+		if !ok || len(pFiles) != 2 {
+			t.Fatalf("%s: files = %v", name, payload["files"])
+		}
+		if pFiles[0]["lang"] != "yaml" || pFiles[0]["file_type"] != "code" {
+			t.Errorf("%s: app.conf lang=%v file_type=%v, want yaml code", name, pFiles[0]["lang"], pFiles[0]["file_type"])
+		}
+		for _, key := range []string{"lang", "file_type"} {
+			if _, has := pFiles[1][key]; has {
+				t.Errorf("%s: notes.md has %s key, want it omitted", name, key)
+			}
+		}
+	}
+}
+
 func TestLoadShareFilesFromDisk_OrphanedFiles(t *testing.T) {
 	dir := t.TempDir()
 
@@ -1283,6 +1310,20 @@ func TestLoadCliArgsFromReviewFile(t *testing.T) {
 		got := LoadCliArgsFromReviewFile("/nonexistent/path.json")
 		if got != nil {
 			t.Errorf("expected nil, got %v", got)
+		}
+	})
+
+	t.Run("drops a focus key", func(t *testing.T) {
+		for _, key := range []string{"range:abc..def", "pr:42", "mr:o/r#7"} {
+			dir := t.TempDir()
+			critPath := filepath.Join(dir, "review.json")
+			cj := CritJSON{Branch: "main", CliArgs: []string{key}, Files: map[string]CritJSONFile{}}
+			data, _ := json.Marshal(cj)
+			os.WriteFile(session.MustMkdirAll(review.ReviewPathsFor(critPath).Review), data, 0644)
+
+			if got := LoadCliArgsFromReviewFile(critPath); got != nil {
+				t.Errorf("cli_args %q: expected nil, got %v", key, got)
+			}
 		}
 	})
 
@@ -1685,12 +1726,15 @@ func TestResolveOperationTargetNewShareAndBoundConflicts(t *testing.T) {
 	if _, err := resolveOperationTarget(cfg, "https://b.example", true, cj, true); err == nil {
 		t.Fatal("expected bound/explicit mismatch to fail")
 	}
-	target, err := resolveOperationTarget(cfg, "", false, session.CritJSON{ShareURL: "https://a.example/r/tok"}, true)
-	if err != nil {
-		t.Fatal(err)
+	got, err := resolveOperationTarget(cfg, "", false, session.CritJSON{ShareURL: "https://a.example/r/tok"}, true)
+	if err != nil || got.URL != "https://a.example" {
+		t.Fatalf("legacy review matching a deployment got=%#v err=%v, want https://a.example", got, err)
 	}
-	if target.URL != "https://a.example" {
-		t.Fatalf("inferred base = %q", target.URL)
+	if _, err := resolveOperationTarget(cfg, "", false, session.CritJSON{ShareURL: "https://legacy.example.com/unknown/r/review-token"}, true); err == nil || !strings.Contains(err.Error(), "cannot identify") {
+		t.Fatalf("uninferable legacy review must keep the explicit error, got %v", err)
+	}
+	if _, err := resolveOperationTarget(cfg, "", false, session.CritJSON{ShareURL: "https://other.example/r/tok"}, true); err == nil || !strings.Contains(err.Error(), "cannot identify") {
+		t.Fatalf("inferred base that is not configured must not fall through to the default, got %v", err)
 	}
 }
 
@@ -2580,5 +2624,23 @@ func TestLoadPreviewShareComments_IncludesPulledKeys(t *testing.T) {
 		if got[body] != file {
 			t.Errorf("comment %q file = %q, want %q", body, got[body], file)
 		}
+	}
+}
+
+func TestPersistShareState_DoesNotOverwriteCorruptFile(t *testing.T) {
+	dir := t.TempDir()
+	reviewPath := session.MustMkdirAll(filepath.Join(dir, ".crit", "review.json"))
+	if err := os.WriteFile(reviewPath, []byte("{not json"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	err := persistShareState(filepath.Join(dir, ".crit"), "https://crit.md/r/abc", "tok_123", "", "", "", "")
+
+	if err == nil {
+		t.Fatal("expected an error for a corrupt review file")
+	}
+	data, _ := os.ReadFile(reviewPath)
+	if string(data) != "{not json" {
+		t.Errorf("corrupt review file was overwritten: %q", data)
 	}
 }

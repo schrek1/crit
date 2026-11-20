@@ -4,28 +4,64 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
+	"net/http"
 	"os"
 	"path/filepath"
 	"strings"
 	"time"
 
+	"github.com/tomasz-tomczyk/crit/internal/comment"
 	"github.com/tomasz-tomczyk/crit/internal/config"
 	"github.com/tomasz-tomczyk/crit/internal/hooks"
 	"github.com/tomasz-tomczyk/crit/internal/prompt"
 	"github.com/tomasz-tomczyk/crit/internal/session"
 )
 
-func (s *Server) promptTrustState() (prompt.TrustState, error) {
-	_, projectPrompts := config.LoadPromptMaps(s.projectDir)
+func (s *Server) loadPromptConfig() (global, project map[string]string, trust prompt.TrustState) {
+	global, project = config.LoadPromptMaps(s.projectDir)
 	_, projectHooks := config.LoadHookMaps(s.projectDir)
-	return prompt.EvaluateTrust(s.projectDir, projectPrompts, projectHooks)
+	trust, err := prompt.EvaluateTrust(s.projectDir, project, projectHooks)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Warning: evaluating project prompt trust: %v\n", err)
+	}
+	return global, project, trust
+}
+
+func finishPromptMode(sess *Session) string {
+	mode := prompt.PromptMode(sess.ReviewType, sess.Mode)
+	if mode == "diff" && sess.GetStory() != nil {
+		return "story"
+	}
+	return mode
+}
+
+func (s *Server) checkFinishPrompts(sess *Session) []prompt.Problem {
+	global, project, trust := s.loadPromptConfig()
+	return prompt.Check(global, project, s.projectDir, s.homeDir, finishPromptMode(sess), trust.UseProject)
+}
+
+// renderFinishPrompt renders the finish prompt for /api/finish. When it
+// cannot, it writes the error response and returns ok=false: 403 if project
+// prompts became untrusted, or 422 with the prompt problem so the review
+// stays open.
+func (s *Server) renderFinishPrompt(w http.ResponseWriter, sess *Session, approved bool, stats map[string]any) (prompt.FinishResult, bool) {
+	ctx := s.buildPromptContext(sess, approved, stats)
+	// Recheck the trust hash after flushing the review in case a project
+	// prompt changed while the request was waiting for the write.
+	globalPrompts, projectPrompts, trust := s.loadPromptConfig()
+	if trust.Untrusted {
+		http.Error(w, "project prompt trust required", http.StatusForbidden)
+		return prompt.FinishResult{}, false
+	}
+	finish := prompt.RenderFinish(globalPrompts, projectPrompts, s.projectDir, s.homeDir, trust.UseProject, ctx)
+	if finish.Problem != nil {
+		writeJSONStatus(w, http.StatusUnprocessableEntity, finish.Problem)
+		return prompt.FinishResult{}, false
+	}
+	return finish, true
 }
 
 func (s *Server) buildPromptContext(sess *Session, approved bool, stats map[string]any) prompt.Context {
-	mode := prompt.PromptMode(sess.ReviewType, sess.Mode)
-	if mode == "diff" && sess.GetStory() != nil {
-		mode = "story"
-	}
 	reviewPath := sess.CritJSONPath()
 	quoted := shellQuoteArg(reviewPath)
 	ctx := prompt.Context{
@@ -34,13 +70,14 @@ func (s *Server) buildPromptContext(sess *Session, approved bool, stats map[stri
 		CommentsAllCmd:      "crit comments --json --all " + quoted,
 		NextRoundCmd:        session.NextRoundCommand(sess),
 		SessionKey:          sess.SessionKey,
-		Mode:                mode,
+		Mode:                finishPromptMode(sess),
 		UnresolvedCount:     sess.UnresolvedCommentCount(),
 		TotalCount:          sess.TotalCommentCount(),
 		FilesWithComments:   filesWithUnresolvedComments(sess),
 		Approved:            approved,
 		InternalSessionMode: sess.Mode,
 		PlanHook:            sess.PlanHook(),
+		AgentInstantReplies: s.cfg.AgentInstantReplies,
 	}
 	if sess.Mode == "plan" && sess.PlanDir != "" {
 		ctx.PlanSlug = filepath.Base(sess.PlanDir)
@@ -99,74 +136,28 @@ func filesWithUnresolvedComments(sess *Session) []string {
 	return out
 }
 
-func (s *Server) renderFinishPrompts(sess *Session, approved bool, stats map[string]any) (promptStr string, meta *prompt.Meta) {
-	globalPrompts, projectPrompts := config.LoadPromptMaps(s.projectDir)
-	_, projectHooks := config.LoadHookMaps(s.projectDir)
-	trust, err := prompt.EvaluateTrust(s.projectDir, projectPrompts, projectHooks)
+// renderAgentRequestPrompt renders the on_agent_request prompt for comments
+// delivered to the waiting agent mid-round.
+func (s *Server) renderAgentRequestPrompt(sess *Session, comments []comment.ListedComment, nextCommand string) string {
+	globalPrompts, projectPrompts, trust := s.loadPromptConfig()
+	commentsJSON, _ := json.Marshal(comments)
+	planSlug := ""
+	if sess.Mode == "plan" && sess.PlanDir != "" {
+		planSlug = filepath.Base(sess.PlanDir)
+	}
+	data := map[string]any{
+		"comments_json":         string(commentsJSON),
+		"comment_count":         len(comments),
+		"next_round_cmd":        nextCommand,
+		"internal_session_mode": sess.Mode,
+		"plan_slug":             planSlug,
+	}
+	result, err := prompt.RenderHook(globalPrompts, projectPrompts, s.projectDir, s.homeDir, trust.UseProject, prompt.HookAgentRequest, data)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "Warning: evaluating project prompt trust: %v\n", err)
+		fmt.Fprintf(os.Stderr, "Warning: %v\n", err)
+		return string(commentsJSON)
 	}
-	ctx := s.buildPromptContext(sess, approved, stats)
-	result := prompt.RenderFinish(globalPrompts, projectPrompts, s.projectDir, s.homeDir, trust.UseProject, ctx)
-	return result.Prompt, result.Meta
-}
-
-func (s *Server) projectPromptsUntrusted() bool {
-	trust, err := s.promptTrustState()
-	if err != nil {
-		return false
-	}
-	return trust.Untrusted
-}
-
-func (s *Server) projectPromptTrustPayload() map[string]any {
-	trust, err := s.promptTrustState()
-	if err != nil {
-		return map[string]any{"project_prompts_untrusted": false}
-	}
-	out := map[string]any{
-		"project_prompts_untrusted": trust.Untrusted,
-	}
-	if trust.HasProjectPrompts {
-		out["project_prompt_sources"] = trust.Sources
-		out["project_prompt_content_hash"] = trust.ContentHash
-	}
-	return out
-}
-
-func (s *Server) renderProjectPromptPreview(sess *Session) string {
-	_, projectPrompts := config.LoadPromptMaps(s.projectDir)
-	_, projectHooks := config.LoadHookMaps(s.projectDir)
-	trust, err := prompt.EvaluateTrust(s.projectDir, projectPrompts, projectHooks)
-	if err != nil || !trust.HasProjectPrompts {
-		return ""
-	}
-	var sections []string
-	for _, spec := range []struct {
-		hook     string
-		approved bool
-	}{
-		{prompt.HookFinishUnresolved, false},
-		{prompt.HookFinishApproved, true},
-	} {
-		ctx := s.buildPromptContext(sess, spec.approved, nil)
-		if !spec.approved && ctx.UnresolvedCount == 0 {
-			ctx.UnresolvedCount = 1
-		}
-		result := prompt.RenderFinish(nil, projectPrompts, s.projectDir, s.homeDir, true, ctx)
-		if result.Prompt == "" || result.Prompt == "Review finished." {
-			continue
-		}
-		if result.Meta == nil || !strings.HasPrefix(result.Meta.TemplateSource, "project:") {
-			continue
-		}
-		label := spec.hook
-		if result.Meta.Hook != "" {
-			label = result.Meta.Hook
-		}
-		sections = append(sections, "=== "+label+" ===\n"+result.Prompt)
-	}
-	return strings.Join(sections, "\n\n")
+	return strings.TrimRight(result.Text, "\n")
 }
 
 // runFinishHooks resolves and executes the configured command hook for the

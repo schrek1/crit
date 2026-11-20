@@ -175,6 +175,8 @@ fi
 
 # Isolate from user's ~/.crit.config.json (and USERPROFILE on Windows).
 e2e_export_fake_home "$DIR"
+# agent-session.filemode.spec.ts reaches the waiting agent.
+echo '{"agent_instant_replies": true}' > "$DIR/.crit.config.json"
 
 # Run crit in file mode (explicit file args, inside a git repo)
 e2e_serve "$CRIT_BIN" _serve --no-open --port "$PORT" plan.md server.go handler.js
